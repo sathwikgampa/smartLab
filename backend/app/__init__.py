@@ -8,6 +8,7 @@ from pathlib import Path
 from flask import Flask, jsonify, send_from_directory
 from flask_cors import CORS
 from werkzeug.exceptions import HTTPException
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from .auth import init_auth
 from .config import Config
@@ -25,6 +26,10 @@ def create_app(config_object: type[Config] | Config = Config, **overrides) -> Fl
     app = Flask(__name__)
     app.config.from_object(config_object)
     app.config.update(overrides)
+    if app.config["TRUST_PROXY_HOPS"] > 0:
+        # Behind a reverse proxy remote_addr is the proxy, so every client would share one rate-limit bucket.
+        hops = app.config["TRUST_PROXY_HOPS"]
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=hops, x_proto=hops)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     for key in ("DATA_DIR", "UPLOAD_DIR", "INDEX_DIR"):
@@ -83,7 +88,8 @@ def create_app(config_object: type[Config] | Config = Config, **overrides) -> Fl
         })
 
     # Serve built frontend if dist folder exists (e.g. Render / production deployment)
-    dist_dir = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+    dist_dir = app.config.get("FRONTEND_DIST") or Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+    dist_dir = Path(dist_dir)
     if not dist_dir.is_dir():
         dist_env = os.getenv("FRONTEND_DIST")
         dist_dir = Path(dist_env) if dist_env else None
@@ -96,8 +102,13 @@ def create_app(config_object: type[Config] | Config = Config, **overrides) -> Fl
                 return jsonify({"error": "Not found"}), 404
             file_target = dist_dir / path
             if path and file_target.is_file():
-                return send_from_directory(dist_dir, path)
-            return send_from_directory(dist_dir, "index.html")
+                resp = send_from_directory(dist_dir, path)
+                if path.startswith("assets/"):  # content-hashed by Vite: cacheable forever, at the edge too
+                    resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+                return resp
+            resp = send_from_directory(dist_dir, "index.html")
+            resp.headers["Cache-Control"] = "no-cache"  # always revalidate so a new deploy is picked up
+            return resp
 
     return app
 

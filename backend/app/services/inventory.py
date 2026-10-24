@@ -109,28 +109,30 @@ def get_reagent(conn: sqlite3.Connection, reagent_id: int) -> dict[str, Any] | N
     return annotate(dict(row)) if row else None
 
 
-def create_reagent(conn: sqlite3.Connection, payload: dict[str, Any]) -> dict[str, Any]:
+def create_reagent(conn: sqlite3.Connection, payload: dict[str, Any], actor: str | None = None) -> dict[str, Any]:
     clean = validate_payload(payload)
     cols = ", ".join(clean)
     cur = conn.execute(f"INSERT INTO reagents ({cols}) VALUES ({', '.join('?' * len(clean))})", list(clean.values()))
-    audit(conn, "create", "reagent", cur.lastrowid, f"Added reagent '{clean['name']}'")
+    audit(conn, "create", "reagent", cur.lastrowid, f"Added reagent '{clean['name']}'", actor)
     conn.commit()
     return get_reagent(conn, cur.lastrowid)
 
 
-def update_reagent(conn: sqlite3.Connection, reagent_id: int, payload: dict[str, Any]) -> dict[str, Any] | None:
+def update_reagent(conn: sqlite3.Connection, reagent_id: int, payload: dict[str, Any],
+                   actor: str | None = None) -> dict[str, Any] | None:
     clean = validate_payload(payload, partial=True)
     if not get_reagent(conn, reagent_id):
         return None
     if clean:
         sets = ", ".join(f"{k} = ?" for k in clean)
         conn.execute(f"UPDATE reagents SET {sets} WHERE id = ?", [*clean.values(), reagent_id])
-        audit(conn, "edit", "reagent", reagent_id, f"Edited {', '.join(clean)} of reagent #{reagent_id}")
+        audit(conn, "edit", "reagent", reagent_id, f"Edited {', '.join(clean)} of reagent #{reagent_id}", actor)
         conn.commit()
     return get_reagent(conn, reagent_id)
 
 
-def adjust_stock(conn: sqlite3.Connection, reagent_id: int, delta: float) -> dict[str, Any] | None:
+def adjust_stock(conn: sqlite3.Connection, reagent_id: int, delta: float,
+                 actor: str | None = None) -> dict[str, Any] | None:
     """Consume (negative delta) or restock (positive). Stock may never go negative."""
     reagent = get_reagent(conn, reagent_id)
     if reagent is None:
@@ -142,16 +144,16 @@ def adjust_stock(conn: sqlite3.Connection, reagent_id: int, delta: float) -> dic
         )
     conn.execute("UPDATE reagents SET quantity = ? WHERE id = ?", (round(new_qty, 6), reagent_id))
     audit(conn, "stock", "reagent", reagent_id,
-          f"{reagent['name']}: {'+' if delta > 0 else ''}{delta:g} {reagent['unit']} (now {new_qty:g} {reagent['unit']})")
+          f"{reagent['name']}: {'+' if delta > 0 else ''}{delta:g} {reagent['unit']} (now {new_qty:g} {reagent['unit']})", actor)
     conn.commit()
     return get_reagent(conn, reagent_id)
 
 
-def delete_reagent(conn: sqlite3.Connection, reagent_id: int) -> bool:
+def delete_reagent(conn: sqlite3.Connection, reagent_id: int, actor: str | None = None) -> bool:
     reagent = get_reagent(conn, reagent_id)
     cur = conn.execute("DELETE FROM reagents WHERE id = ?", (reagent_id,))
     if reagent:
-        audit(conn, "delete", "reagent", reagent_id, f"Removed reagent '{reagent['name']}'")
+        audit(conn, "delete", "reagent", reagent_id, f"Removed reagent '{reagent['name']}'", actor)
     conn.commit()
     return cur.rowcount > 0
 

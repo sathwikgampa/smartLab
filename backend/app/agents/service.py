@@ -51,7 +51,8 @@ def legacy_fields(result: dict[str, Any], question: str) -> dict[str, Any]:
     }
 
 
-def persist_run(db, *, question: str, session_id: str, result: dict[str, Any]) -> int:
+def persist_run(db, *, question: str, session_id: str, result: dict[str, Any],
+                user_id: int | None = None) -> int:
     """Store the exchange in chat history and an audit record in ``agent_runs``. Returns the message id."""
     db.execute("INSERT INTO chat_messages (session_id, role, content) VALUES (?, 'user', ?)", (session_id, question))
     meta = {k: result[k] for k in (
@@ -71,7 +72,7 @@ def persist_run(db, *, question: str, session_id: str, result: dict[str, Any]) -
         "INSERT INTO agent_runs (request_id, organization_id, user_id, session_id, question, intent, status, "
         "confidence, uncertainty_flag, blockers_json, tools_json, citations_json, llm_calls, duration_ms, started_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (result["request_id"], current_organization_id(), None, session_id, question[:2000], result["intent"],
+        (result["request_id"], current_organization_id(), None if user_id is None else str(user_id), session_id, question[:2000], result["intent"],
          result["status"], result["confidence"], bool(result["uncertainty_flag"]), dumps(result["blockers"]),
          dumps(tools), dumps(citations), result["llm_calls"], result["duration_ms"], result["started_at"]))
     db.commit()

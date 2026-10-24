@@ -121,7 +121,8 @@ class FaissVectorStore:
             if allowed_ids is not None:
                 if not allowed_ids:
                     return []
-                selector = self._faiss.IDSelectorArray(np.asarray(sorted(allowed_ids), dtype=np.int64))
+                # IDSelectorBatch is hash-based (O(1) per candidate); IDSelectorArray scans the whole list.
+                selector = self._faiss.IDSelectorBatch(np.fromiter(allowed_ids, dtype=np.int64, count=len(allowed_ids)))
                 params = self._faiss.SearchParameters(sel=selector)
             scores, ids = self._index.search(q, min(k, len(self)), params=params)
             return [(int(i), float(s)) for i, s in zip(ids[0], scores[0]) if i != -1]

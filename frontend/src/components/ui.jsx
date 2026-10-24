@@ -1,9 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
-import rehypeKatex from "rehype-katex";
-import "katex/dist/katex.min.css";
+import { lazy, Suspense, useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   AlertOctagon, AlertTriangle, CheckCircle2, FileText, Info, Loader2, RefreshCw, ShieldAlert, UploadCloud, X,
 } from "lucide-react";
@@ -299,36 +294,15 @@ export function ProgressBar({ value, label }) {
 }
 
 /* ------------------------------------------------------------------ markdown */
-const CITE_RE = /\[(\d+)\](?!\()/g;
+// The renderer (react-markdown, remark/rehype, KaTeX + CSS) is loaded on demand so it is not in the entry chunk.
+const MarkdownRenderer = lazy(() => import("./Markdown"));
 
 /** Markdown + LaTeX. Inline markers like [2] become citation buttons when `citations` are supplied. */
-export function Markdown({ children, citations = [], onCite }) {
-  const text = citations.length ? String(children).replace(CITE_RE, (m, n) => `[${n}](#cite-${n})`) : String(children);
+export function Markdown(props) {
   return (
-    <div className="prose-lab">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkMath]}
-        rehypePlugins={[rehypeKatex]}
-        components={{
-          a({ href, children: label }) {
-            if (href?.startsWith("#cite-")) {
-              const c = citations.find((x) => x.n === Number(href.slice(6)));
-              return (
-                <button type="button" onClick={() => c && onCite?.(c)}
-                  aria-label={c ? `Source ${c.n}: ${c.document_title}, page ${c.page}` : "Citation"}
-                  title={c ? `${c.document_title}, p. ${c.page}` : undefined}
-                  className="mx-0.5 inline-flex h-[1.15rem] min-w-[1.15rem] items-center justify-center rounded bg-accent-soft px-1 align-[0.1em] font-mono text-2xs font-semibold text-accent-strong ring-1 ring-inset ring-accent/30 hover:bg-accent/20">
-                  {label}
-                </button>
-              );
-            }
-            return <a href={href} target="_blank" rel="noreferrer noopener">{label}</a>;
-          },
-        }}
-      >
-        {text}
-      </ReactMarkdown>
-    </div>
+    <Suspense fallback={<div className="prose-lab whitespace-pre-wrap">{String(props.children)}</div>}>
+      <MarkdownRenderer {...props} />
+    </Suspense>
   );
 }
 

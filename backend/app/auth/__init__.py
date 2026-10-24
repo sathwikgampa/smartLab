@@ -104,6 +104,16 @@ def current_user() -> dict[str, Any] | None:
     return g.get("user")
 
 
+def actor_name() -> str | None:
+    """Who to record in the audit log: the signed-in user, taken from the server-side session only.
+
+    Never read from the request body, which a client could set to any name. ``None`` when no one is
+    signed in (only possible with ``SMARTLAB_AUTH_REQUIRED`` off).
+    """
+    user = current_user()
+    return user["name"] if user else None
+
+
 # ------------------------------------------------------------------ rate limiting
 class RateLimiter:
     """Sliding-window counter kept in process memory (per worker). Good enough to slow down

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from flask import Blueprint, jsonify, request
 
+from ..auth import actor_name
 from ..db import audit, get_db, get_setting, query_all, set_setting
 from ..rag.engine import _snippet
 from .common import ApiError, json_body, llm, rag
@@ -99,6 +100,6 @@ def update_settings():
                 raise ApiError(f"{key} is limited to {limit} characters.", 422)
             set_setting(db, key, value.strip())
     audit(db, "edit", "settings", None, "Updated " + ", ".join(k for k in data if k in EDITABLE_SETTINGS),
-          data.get("actor"))
+          actor_name())
     db.commit()
     return get_settings()

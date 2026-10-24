@@ -10,10 +10,11 @@ import threading
 import time
 import uuid
 
-from flask import Blueprint, Response, current_app, jsonify, request, stream_with_context
+from flask import Blueprint, Response, current_app, g, jsonify, request
 
 from ..agents.service import legacy_fields, make_orchestrator, persist_run
 from ..agents.tools import ERROR_CODE, UPLOAD_ID
+from ..auth import actor_name
 from ..db import audit, dumps, execute, get_db, loads, query_all, query_one
 from .common import ApiError, int_arg, json_body, rag, require
 from .ratelimit import rate_limited
@@ -64,8 +65,13 @@ def chat():
     inp = _chat_input(json_body())
     orchestrator = make_orchestrator(document_ids=inp["document_ids"])
     result = orchestrator.run(inp["question"], upload_id=inp["upload_id"], error_code=inp["error_code"])
-    msg_id = persist_run(get_db(), question=inp["question"], session_id=inp["session_id"], result=result)
+    msg_id = persist_run(get_db(), question=inp["question"], session_id=inp["session_id"], result=result,
+                         user_id=_user_id())
     return jsonify(_response(inp, result, msg_id))
+
+
+def _user_id() -> int | None:
+    return (g.get("user") or {}).get("id")
 
 
 def _sse(event: str, payload: dict) -> str:
@@ -75,51 +81,57 @@ def _sse(event: str, payload: dict) -> str:
 @bp.post("/chat/stream")
 @rate_limited("agent")
 def chat_stream():
-    """Same run as /api/chat, streamed: one ``trace`` event per completed step, then ``result`` (or ``error``)."""
+    """Same run as /api/chat, streamed: one ``trace`` event per completed step, then ``result`` (or ``error``).
+
+    The run is executed *and persisted* on a worker thread with its own app context, so the audit record in
+    ``agent_runs`` is written even if the client disconnects mid-stream. The response generator holds no
+    request context and no database connection while it waits (the request's pooled connection is returned
+    as soon as this view returns).
+    """
     inp = _chat_input(json_body())
+    app = current_app._get_current_object()
+    user_id = _user_id()
     events: queue.Queue = queue.Queue()
     orchestrator = make_orchestrator(on_event=lambda kind, payload: events.put((kind, payload)),
                                      document_ids=inp["document_ids"])
-    hard_limit = float(current_app.config.get("AGENT_TIMEOUT_S", 90)) + 30
+    hard_limit = float(app.config.get("AGENT_TIMEOUT_S", 90)) + 30
 
     def work() -> None:
-        try:
-            events.put(("result", orchestrator.run(inp["question"], upload_id=inp["upload_id"],
-                                                   error_code=inp["error_code"])))
-        except Exception:  # noqa: BLE001 - details go to the log only
-            logger.exception("Streaming agent run failed")
-            events.put(("error", {"error": "The co-pilot could not complete this request."}))
+        with app.app_context():  # own pooled connection, released by close_db when the context ends
+            try:
+                result = orchestrator.run(inp["question"], upload_id=inp["upload_id"], error_code=inp["error_code"])
+                msg_id = persist_run(get_db(), question=inp["question"], session_id=inp["session_id"],
+                                     result=result, user_id=user_id)
+                events.put(("result", _response(inp, result, msg_id)))
+            except Exception:  # noqa: BLE001 - details go to the log only
+                logger.exception("Streaming agent run failed")
+                events.put(("error", {"error": "The co-pilot could not complete this request."}))
 
     threading.Thread(target=work, daemon=True, name="agent-run").start()
 
-    @stream_with_context
     def generate():
         started = time.monotonic()
         yield ": stream open\n\n"
-        while True:
-            try:
-                kind, payload = events.get(timeout=10)
-            except queue.Empty:
-                if time.monotonic() - started > hard_limit:
-                    yield _sse("error", {"error": "The co-pilot timed out."})
-                    return
-                yield ": keep-alive\n\n"
-                continue
-            if kind == "result":
+        try:
+            while True:
                 try:
-                    msg_id = persist_run(get_db(), question=inp["question"], session_id=inp["session_id"],
-                                         result=payload)
-                    payload = _response(inp, payload, msg_id)
-                except Exception:  # noqa: BLE001
-                    logger.exception("Could not store agent run")
-                    yield _sse("error", {"error": "The co-pilot could not complete this request."})
+                    kind, payload = events.get(timeout=10)
+                except queue.Empty:
+                    if time.monotonic() - started > hard_limit:
+                        yield _sse("error", {"error": "The co-pilot timed out."})
+                        return
+                    yield ": keep-alive\n\n"
+                    continue
+                yield _sse(kind, payload)
+                if kind in ("result", "error"):
                     return
-            yield _sse(kind, payload)
-            if kind in ("result", "error"):
-                return
+        except GeneratorExit:  # client went away; the worker still finishes and records the run
+            logger.info("Client left the co-pilot stream; the run continues and will be recorded.")
+            raise
 
+    # no-transform: intermediaries must not buffer or re-encode the event stream.
     return Response(generate(), mimetype="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+                    headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"})
 
 
 @bp.post("/chat/<session_id>/messages")
@@ -191,7 +203,7 @@ def give_feedback(message_id: int):
     cur = db.execute("INSERT INTO answer_feedback (message_id, rating, comment, status) VALUES (?, ?, ?, ?)",
                      (message_id, rating, comment, status))
     if status == "open":
-        audit(db, "flag", "answer", message_id, f"Answer flagged as {rating}: {comment}")
+        audit(db, "flag", "answer", message_id, f"Answer flagged as {rating}: {comment}", actor_name())
     db.commit()
     return jsonify(query_one("SELECT * FROM answer_feedback WHERE id = ?", (cur.lastrowid,))), 201
 
@@ -227,7 +239,7 @@ def resolve_feedback(feedback_id: int):
     db = get_db()
     db.execute("UPDATE answer_feedback SET status = 'resolved', resolution = ?, resolved_at = datetime('now') WHERE id = ?",
                (resolution[:2000], feedback_id))
-    audit(db, "resolve", "answer", item["message_id"], f"Review resolved: {resolution[:200]}", data.get("actor"))
+    audit(db, "resolve", "answer", item["message_id"], f"Review resolved: {resolution[:200]}", actor_name())
     db.commit()
     return jsonify(query_one("SELECT * FROM answer_feedback WHERE id = ?", (feedback_id,)))
 

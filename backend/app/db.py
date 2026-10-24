@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import functools
 import json
+import logging
 import re
 import sqlite3
 from pathlib import Path
@@ -19,6 +20,8 @@ from typing import Any, Iterable, Sequence
 from flask import current_app, g
 
 from .config import is_postgres_url, redact_url
+
+logger = logging.getLogger(__name__)
 
 
 SCHEMA = """
@@ -203,7 +206,7 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     meta_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_messages(session_id);
+CREATE INDEX IF NOT EXISTS idx_chat_session_id ON chat_messages(session_id, id);
 
 CREATE TABLE IF NOT EXISTS answer_feedback (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -313,6 +316,52 @@ CREATE TABLE IF NOT EXISTS password_resets (
 );
 CREATE INDEX IF NOT EXISTS idx_password_resets_user ON password_resets(user_id);
 """
+
+# Indexes for the hot query paths. Created one by one after SCHEMA, so a database from an older release
+# that lacks one of the columns (only MIGRATIONS columns are added automatically) still starts; that
+# index is skipped and logged.
+INDEXES = (
+    "CREATE INDEX IF NOT EXISTS idx_feedback_message ON answer_feedback(message_id)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity_type, entity_id, id)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_documents_org ON documents(organization_id)",
+    "CREATE INDEX IF NOT EXISTS idx_reagents_org_expiry ON reagents(organization_id, expiry_date, id)",
+    "CREATE INDEX IF NOT EXISTS idx_troubleshooting_verified_codes ON troubleshooting(organization_id, error_code) "
+    "WHERE verified = 1 AND error_code IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_steps_experiment ON experiment_steps(experiment_id, position)",
+    "CREATE INDEX IF NOT EXISTS idx_variables_experiment ON experiment_variables(experiment_id)",
+    "CREATE INDEX IF NOT EXISTS idx_reviews_experiment ON reviews(experiment_id)",
+    "CREATE INDEX IF NOT EXISTS idx_reviews_reviewer_pending ON reviews(reviewer_id) WHERE status = 'pending'",
+    "CREATE INDEX IF NOT EXISTS idx_experiments_owner ON experiments(owner_id)",
+    "CREATE INDEX IF NOT EXISTS idx_experiments_project ON experiments(project_id)",
+    "CREATE INDEX IF NOT EXISTS idx_auth_sessions_expiry ON auth_sessions(expires_at)",
+)
+
+# Audit tables are append-only: the database itself rejects UPDATE and DELETE on them (GxP audit trail).
+APPEND_ONLY_TABLES = ("audit_log", "agent_runs")
+
+SQLITE_AUDIT_GUARD = "".join(
+    f"""
+CREATE TRIGGER IF NOT EXISTS {t}_no_update BEFORE UPDATE ON {t}
+BEGIN SELECT RAISE(ABORT, '{t} is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS {t}_no_delete BEFORE DELETE ON {t}
+BEGIN SELECT RAISE(ABORT, '{t} is append-only'); END;
+""" for t in APPEND_ONLY_TABLES)
+
+PG_AUDIT_GUARD = """
+CREATE OR REPLACE FUNCTION smartlab_append_only() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION '% is append-only', TG_TABLE_NAME USING ERRCODE = 'insufficient_privilege';
+END $$;
+""" + "".join(
+    f"""
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '{t}_append_only' AND tgrelid = '{t}'::regclass) THEN
+        CREATE TRIGGER {t}_append_only BEFORE UPDATE OR DELETE ON {t}
+            FOR EACH ROW EXECUTE FUNCTION smartlab_append_only();
+    END IF;
+END $$;
+""" for t in APPEND_ONLY_TABLES)
 
 # Columns added after the first release; added to existing databases on start-up.
 # organization_id: there is no authentication yet, so every row belongs to the default organisation (1).
@@ -691,13 +740,41 @@ def init_schema(conn: sqlite3.Connection | PgConnection) -> None:
         transaction_lock(conn, "schema")
         _migrate_pg(conn)
         conn.executescript(PG_SCHEMA)
+        _create_indexes(conn)
+        conn.executescript(PG_AUDIT_GUARD)
         conn.commit()
         return
     # Older databases may lack the newer columns that the schema's indexes or
     # inserts rely on, so migrate tables that already exist before the full script.
     _migrate(conn)
     conn.executescript(SCHEMA)
+    _create_indexes(conn)
+    conn.executescript(SQLITE_AUDIT_GUARD)
     conn.commit()
+
+
+def _create_indexes(conn: sqlite3.Connection | PgConnection) -> None:
+    pg = is_postgres(conn)
+    for ddl in INDEXES:
+        try:
+            if pg:  # a failed statement would abort the whole PostgreSQL transaction
+                conn.executescript("SAVEPOINT smartlab_index")
+                conn.executescript(ddl)
+                conn.executescript("RELEASE SAVEPOINT smartlab_index")
+            else:
+                conn.execute(ddl)
+        except (sqlite3.OperationalError, _pg_errors()) as exc:
+            if pg:
+                conn.executescript("ROLLBACK TO SAVEPOINT smartlab_index")
+            logger.warning("Index skipped (older table layout): %s (%s)", ddl.split(" ON ")[0], exc)
+
+
+def _pg_errors() -> type[BaseException] | tuple[type[BaseException], ...]:
+    try:
+        import psycopg2
+    except ImportError:  # pragma: no cover - SQLite-only installs
+        return ()
+    return psycopg2.Error
 
 
 def _migrate(conn: sqlite3.Connection) -> None:

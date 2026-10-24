@@ -97,7 +97,9 @@ class Config:
     # PostgreSQL (e.g. Supabase) when SMARTLAB_DATABASE_URL / DATABASE_URL is set; otherwise DATABASE_PATH.
     DATABASE_ENGINE = _DB_ENGINE
     DATABASE_URL = _DB_URL
-    DB_POOL_MAX = int(os.getenv("SMARTLAB_DB_POOL_MAX", "5"))
+    # Connections are opened lazily. Size for the busiest case in one process: every Gunicorn thread
+    # (gunicorn.conf.py, 16) plus every agent-tool thread (agents/tools.py, 8) holding one at once.
+    DB_POOL_MAX = int(os.getenv("SMARTLAB_DB_POOL_MAX", "24"))
     UPLOAD_DIR = Path(os.getenv("SMARTLAB_UPLOAD_DIR", DATA_DIR / "uploads"))
     # The vector index is keyed by chunk id, so a PostgreSQL database gets its own index directory
     # rather than reusing one built from the SQLite file (it is rebuilt from the chunks table).
@@ -152,6 +154,8 @@ class Config:
         if o.strip()
     ] + [r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"]
     SEED_DEMO_DATA = _env_bool("SMARTLAB_SEED_DEMO", True)
+    # Number of trusted reverse-proxy hops in front of the app (Render: 1). 0 trusts no X-Forwarded-* header.
+    TRUST_PROXY_HOPS = int(os.getenv("SMARTLAB_TRUST_PROXY_HOPS", "0"))
     # Lab co-pilot demo SOPs, stock lots and fixes (added only to a database that holds the demo records).
     SEED_AGENT_DEMO = _env_bool("SMARTLAB_SEED_AGENT_DEMO", True)
     TESTING = False

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import "../components/Markdown";
 import {
   AlertTriangle, BookOpen, Boxes, ChevronRight, CornerDownRight, FileText, FileUp, History, ImagePlus, MessageSquareText,
   ShieldAlert, Trash2, Wrench, X,

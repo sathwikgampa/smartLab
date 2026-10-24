@@ -5,6 +5,7 @@ import io
 
 from flask import Blueprint, current_app, jsonify, request, send_file
 
+from ..auth import actor_name
 from ..db import audit, get_db, query_all, query_one
 from ..rag.engine import APPROVAL_STATUSES, DuplicateDocumentError, clean_metadata
 from ..rag.pdf_extractor import render_page_png
@@ -71,7 +72,7 @@ def upload_document():
     except ValueError as exc:
         raise ApiError(str(exc), 422) from exc
     audit(db, "upload", "document", doc["id"], f"Uploaded and indexed '{doc['title']}' ({doc['page_count']} pages)",
-          form.get("actor"))
+          actor_name())
     db.commit()
     return jsonify(doc), 201
 
@@ -99,9 +100,9 @@ def update_document(doc_id: int):
     db.execute(f"UPDATE documents SET {sets}{extra}, updated_at = datetime('now') WHERE id = ?", [*meta.values(), doc_id])
     if meta.get("approval_status") and meta["approval_status"] != doc["approval_status"]:
         audit(db, "status_change", "document", doc_id,
-              f"'{doc['title']}' {doc['approval_status']} -> {meta['approval_status']}", data.get("actor"))
+              f"'{doc['title']}' {doc['approval_status']} -> {meta['approval_status']}", actor_name())
     else:
-        audit(db, "edit", "document", doc_id, f"Edited metadata of '{doc['title']}'", data.get("actor"))
+        audit(db, "edit", "document", doc_id, f"Edited metadata of '{doc['title']}'", actor_name())
     db.commit()
     return jsonify(_get_doc(doc_id))
 
@@ -116,7 +117,8 @@ def reindex_document(doc_id: int):
         raise ApiError(str(exc), 410) from exc
     except ValueError as exc:
         raise ApiError(str(exc), 422) from exc
-    audit(db, "reindex", "document", doc_id, f"Re-indexed '{doc['title']}' ({doc['chunk_count']} chunks)")
+    audit(db, "reindex", "document", doc_id, f"Re-indexed '{doc['title']}' ({doc['chunk_count']} chunks)",
+          actor_name())
     db.commit()
     return jsonify(doc)
 
@@ -140,7 +142,7 @@ def delete_document(doc_id: int):
     doc = _get_doc(doc_id)
     db = get_db()
     rag().delete(db, doc_id, current_app.config["UPLOAD_DIR"])
-    audit(db, "delete", "document", doc_id, f"Removed '{doc['title']}' from the knowledge base")
+    audit(db, "delete", "document", doc_id, f"Removed '{doc['title']}' from the knowledge base", actor_name())
     db.commit()
     return "", 204
 

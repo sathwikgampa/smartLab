@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle, Boxes, Calculator, CheckCircle2, ChevronDown, Cpu, FlaskConical, Layers, ListChecks, OctagonX,
   Pencil, ShieldAlert, Wrench,
@@ -285,7 +285,7 @@ function Citations({ citations, highlighted, onOpen }) {
 }
 
 /* --------------------------------------------------------------------- answer */
-export default function CopilotAnswer({ msg, demo = false }) {
+function CopilotAnswer({ msg, demo = false }) {
   const { openEvidence } = useApp();
   const [highlighted, setHighlighted] = useState(null);
   const citations = msg.citations ?? [];
@@ -345,3 +345,5 @@ export default function CopilotAnswer({ msg, demo = false }) {
     </article>
   );
 }
+
+export default memo(CopilotAnswer);

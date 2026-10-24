@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
+import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -89,6 +90,10 @@ class RAGEngine:
         self.chunk_overlap = chunk_overlap
         self.top_k = top_k
         self.min_score = embedder.default_min_score if min_score is None else min_score
+        # organization_id -> ids of its chunks. Only ever narrows a search, and is cleared by every index
+        # mutation in this process, so a stale entry can drop a hit but never admit another org's chunk.
+        self._scope_cache: dict[int, frozenset[int]] = {}
+        self._scope_lock = threading.Lock()
 
     # ------------------------------------------------------------------ indexing
     def ensure_index(self, conn: sqlite3.Connection) -> None:
@@ -106,6 +111,7 @@ class RAGEngine:
             batch = rows[start:start + 256]
             self.store.add([r["id"] for r in batch], self.embedder.embed([r["text"] for r in batch]))
         self.store.save()
+        self._invalidate_scope()
 
     def ingest(self, conn: sqlite3.Connection, file: ValidatedFile, upload_dir: Path, *,
                title: str | None = None, doc_type: str = "SOP",
@@ -120,6 +126,8 @@ class RAGEngine:
             raise ValueError("No extractable text was found in this PDF (scanned PDFs need OCR first).")
         title = (title or "").strip() or extract_title(file.data, Path(file.safe_name).stem)
         meta = clean_metadata(metadata or {})
+        # Embed before writing anything, so no database transaction stays open while the model runs.
+        vectors = self.embedder.embed([c.text for c in chunks])
 
         upload_dir.mkdir(parents=True, exist_ok=True)
         path = upload_dir / file.stored_name
@@ -132,22 +140,35 @@ class RAGEngine:
             cur = conn.execute(f"INSERT INTO documents ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
                                values)
             doc_id = cur.lastrowid
-            self._store_chunks(conn, doc_id, chunks)
+            chunk_ids = self._insert_chunks(conn, doc_id, chunks)
             conn.commit()
         except Exception:
             conn.rollback()
             path.unlink(missing_ok=True)
             raise
+        self.store.add(chunk_ids, vectors)  # only committed rows enter the index
         self.store.save()
+        self._invalidate_scope()
         return dict(conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone())
 
-    def _store_chunks(self, conn: sqlite3.Connection, doc_id: int, chunks) -> None:
-        chunk_ids = []
-        for chunk in chunks:
-            c = conn.execute("INSERT INTO chunks (document_id, page, chunk_index, text) VALUES (?, ?, ?, ?)",
-                             (doc_id, chunk.page, chunk.index, chunk.text))
-            chunk_ids.append(c.lastrowid)
-        self.store.add(chunk_ids, self.embedder.embed([c.text for c in chunks]))
+    _INSERT_BATCH = 500  # rows per statement: 2,000 parameters, well inside SQLite's and PostgreSQL's limits
+
+    @classmethod
+    def _insert_chunks(cls, conn: sqlite3.Connection, doc_id: int, chunks) -> list[int]:
+        """Insert ``chunks`` with multi-row INSERTs (one round trip per batch rather than per chunk) and
+        return their ids in ``chunks`` order. Ids are matched by ``(page, chunk_index)``, which is unique within
+        a document (``chunk_index`` restarts on each page), because PostgreSQL does not guarantee the order of
+        ``RETURNING`` rows."""
+        ids: dict[tuple[int, int], int] = {}
+        for start in range(0, len(chunks), cls._INSERT_BATCH):
+            batch = chunks[start:start + cls._INSERT_BATCH]
+            rows = conn.execute(
+                "INSERT INTO chunks (document_id, page, chunk_index, text) VALUES "
+                + ", ".join(["(?, ?, ?, ?)"] * len(batch)) + " RETURNING id, page, chunk_index",
+                [value for c in batch for value in (doc_id, c.page, c.index, c.text)],
+            ).fetchall()
+            ids.update({(r["page"], r["chunk_index"]): r["id"] for r in rows})
+        return [ids[(c.page, c.index)] for c in chunks]
 
     def reindex(self, conn: sqlite3.Connection, document_id: int, upload_dir: Path) -> dict[str, Any] | None:
         """Re-extract and re-embed a stored PDF (e.g. after changing chunk settings)."""
@@ -161,19 +182,21 @@ class RAGEngine:
         chunks = chunk_pages(pages, self.chunk_size, self.chunk_overlap)
         if not chunks:
             raise ValueError("No extractable text was found in this PDF.")
+        vectors = self.embedder.embed([c.text for c in chunks])
         old_ids = [r["id"] for r in conn.execute("SELECT id FROM chunks WHERE document_id = ?", (document_id,))]
         try:
             conn.execute("DELETE FROM chunks WHERE document_id = ?", (document_id,))
-            self.store.remove(old_ids)
-            self._store_chunks(conn, document_id, chunks)
+            new_ids = self._insert_chunks(conn, document_id, chunks)
             conn.execute("UPDATE documents SET page_count = ?, chunk_count = ?, status = 'indexed', "
                          "updated_at = datetime('now') WHERE id = ?", (len(pages), len(chunks), document_id))
             conn.commit()
         except Exception:
-            conn.rollback()
-            self.rebuild(conn)  # resynchronise the vector index with the restored rows
+            conn.rollback()  # the index was not touched, so it still matches the restored rows
             raise
+        self.store.remove(old_ids)
+        self.store.add(new_ids, vectors)
         self.store.save()
+        self._invalidate_scope()
         return dict(conn.execute("SELECT * FROM documents WHERE id = ?", (document_id,)).fetchone())
 
     def delete(self, conn: sqlite3.Connection, document_id: int, upload_dir: Path) -> bool:
@@ -185,6 +208,7 @@ class RAGEngine:
         conn.commit()
         self.store.remove(ids)
         self.store.save()
+        self._invalidate_scope()
         (upload_dir / doc["stored_name"]).unlink(missing_ok=True)
         return True
 
@@ -197,17 +221,19 @@ class RAGEngine:
         if not query:
             return []
         k = k or self.top_k
-        allowed = None
-        if document_ids or organization_id is not None:
-            sql = "SELECT c.id FROM chunks c JOIN documents d ON d.id = c.document_id WHERE 1=1"
-            params: list[Any] = []
-            if document_ids:
-                sql += f" AND c.document_id IN ({','.join('?' * len(document_ids))})"
-                params += list(document_ids)
+        allowed: set[int] | frozenset[int] | None = None
+        if document_ids:
+            sql = (f"SELECT c.id FROM chunks c JOIN documents d ON d.id = c.document_id "
+                   f"WHERE c.document_id IN ({','.join('?' * len(document_ids))})")
+            params: list[Any] = list(document_ids)
             if organization_id is not None:
                 sql += " AND d.organization_id = ?"
                 params.append(organization_id)
             allowed = {r[0] for r in conn.execute(sql, params)}
+            if not allowed:
+                return []
+        elif organization_id is not None:
+            allowed = self._org_chunk_ids(conn, organization_id)
             if not allowed:
                 return []
         hits = self.store.search(self.embedder.embed([query])[0], k * 3, allowed)
@@ -235,6 +261,23 @@ class RAGEngine:
 
         evidence.sort(key=rank, reverse=True)
         return evidence[:k]
+
+    def _org_chunk_ids(self, conn: sqlite3.Connection, organization_id: int) -> frozenset[int]:
+        """Ids of the organisation's chunks, cached until the next index mutation in this process."""
+        with self._scope_lock:
+            cached = self._scope_cache.get(organization_id)
+        if cached is not None:
+            return cached
+        ids = frozenset(r[0] for r in conn.execute(
+            "SELECT c.id FROM chunks c JOIN documents d ON d.id = c.document_id WHERE d.organization_id = ?",
+            (organization_id,)))
+        with self._scope_lock:
+            self._scope_cache[organization_id] = ids
+        return ids
+
+    def _invalidate_scope(self) -> None:
+        with self._scope_lock:
+            self._scope_cache.clear()
 
     # ------------------------------------------------------------------- answers
     def answer(self, conn: sqlite3.Connection, question: str, k: int | None = None,

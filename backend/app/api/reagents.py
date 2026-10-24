@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from flask import Blueprint, jsonify, request
 
+from ..auth import actor_name
 from ..db import get_db
 from ..services import inventory
 from ..services.inventory import InventoryError
@@ -46,7 +47,7 @@ def nl_query():
 @bp.post("")
 def create():
     try:
-        return jsonify(inventory.create_reagent(get_db(), json_body())), 201
+        return jsonify(inventory.create_reagent(get_db(), json_body(), actor_name())), 201
     except InventoryError as exc:
         raise ApiError(str(exc), 422) from exc
 
@@ -62,7 +63,7 @@ def get(reagent_id: int):
 @bp.patch("/<int:reagent_id>")
 def update(reagent_id: int):
     try:
-        reagent = inventory.update_reagent(get_db(), reagent_id, json_body())
+        reagent = inventory.update_reagent(get_db(), reagent_id, json_body(), actor_name())
     except InventoryError as exc:
         raise ApiError(str(exc), 422) from exc
     if reagent is None:
@@ -79,7 +80,7 @@ def adjust(reagent_id: int):
     except (TypeError, ValueError) as exc:
         raise ApiError("delta must be a number.") from exc
     try:
-        reagent = inventory.adjust_stock(get_db(), reagent_id, delta)
+        reagent = inventory.adjust_stock(get_db(), reagent_id, delta, actor_name())
     except InventoryError as exc:
         raise ApiError(str(exc), 422) from exc
     if reagent is None:
@@ -89,6 +90,6 @@ def adjust(reagent_id: int):
 
 @bp.delete("/<int:reagent_id>")
 def delete(reagent_id: int):
-    if not inventory.delete_reagent(get_db(), reagent_id):
+    if not inventory.delete_reagent(get_db(), reagent_id, actor_name()):
         raise ApiError("Reagent not found.", 404)
     return "", 204

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useDeferredValue, useEffect, useState } from "react";
 import {
   ArrowDown, ArrowUp, CheckCircle2, ClipboardCheck, Eye, FlaskConical, ListChecks, Pencil, Plus, Save, Trash2, Variable, XCircle,
 } from "lucide-react";
@@ -22,6 +22,7 @@ function ExperimentDetail({ id, onChanged }) {
   const exp = useAsync(() => api.experiment(id), [id]);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
+  const deferredDraft = useDeferredValue(draft);
   const [step, setStep] = useState("");
   const [variable, setVariable] = useState({ name: "", value: "", unit: "", kind: "controlled" });
   const [decisionNotes, setDecisionNotes] = useState({});
@@ -78,7 +79,7 @@ function ExperimentDetail({ id, onChanged }) {
           {editing ? (
             <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
               <textarea className="input min-h-[16rem] font-mono text-xs" value={draft} onChange={(ev) => setDraft(ev.target.value)} />
-              <div className="panel-muted overflow-auto p-3"><p className="label flex items-center gap-1"><Eye className="h-3 w-3" /> Preview</p><Markdown>{draft}</Markdown></div>
+              <div className="panel-muted overflow-auto p-3"><p className="label flex items-center gap-1"><Eye className="h-3 w-3" /> Preview</p><Markdown>{deferredDraft}</Markdown></div>
             </div>
           ) : <Markdown>{e.protocol_markdown || "_No protocol drafted yet._"}</Markdown>}
           <p className="mt-2 text-[11px] text-muted">Markdown and LaTeX ($...$) supported.</p>

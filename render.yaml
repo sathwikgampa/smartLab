@@ -5,7 +5,7 @@ services:
     plan: free
     region: oregon
     buildCommand: "bash render-build.sh"
-    startCommand: "cd backend && gunicorn run:app --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120"
+    startCommand: "cd backend && gunicorn -c gunicorn.conf.py run:app"
     healthCheckPath: /api/health
     envVars:
       - key: PYTHON_VERSION
@@ -26,3 +26,6 @@ services:
         value: "true"
       - key: ANTHROPIC_API_KEY
         sync: false
+      # Render's proxy is the one hop in front of the app; it sets X-Forwarded-For / -Proto.
+      - key: SMARTLAB_TRUST_PROXY_HOPS
+        value: "1"

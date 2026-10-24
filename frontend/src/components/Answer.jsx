@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import {
   AlignLeft, Check, CheckCircle2, Copy, Eye, FileText, Flag, ImageIcon, Layers, RefreshCw, Search, ThumbsUp, UploadCloud, Wrench,
 } from "lucide-react";
@@ -189,7 +189,7 @@ export function UserMessage({ text, attachment }) {
   );
 }
 
-export function AnswerMessage({ msg, question }) {
+export const AnswerMessage = memo(function AnswerMessage({ msg, question }) {
   const { openEvidence } = useApp();
   const citations = msg.citations ?? [];
   const onCite = (c) => openEvidence(c, citations);
@@ -211,7 +211,7 @@ export function AnswerMessage({ msg, question }) {
       <FeedbackControls messageId={msg.message_id} text={msg.answer} initial={msg.feedback} />
     </article>
   );
-}
+});
 
 export function ImageAnswer({ msg }) {
   const { openEvidence } = useApp();
