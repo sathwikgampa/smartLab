@@ -196,7 +196,8 @@ export const api = {
   safetySearch: (q) => request(`/api/safety/search${qs({ q })}`),
   settings: () => request("/api/settings"),
   updateSettings: (payload) => request("/api/settings", { method: "PUT", body: payload }),
-  activity: (since) => request(`/api/activity${qs({ since })}`),
+  // mine=false (the whole lab's activity) is allowed for administrators only.
+  activity: (since, { mine = true } = {}) => request(`/api/activity${qs({ since, mine })}`),
 
   // Literature
   literature: (q, params = {}) => request(`/api/literature/search${qs({ q, ...params })}`),

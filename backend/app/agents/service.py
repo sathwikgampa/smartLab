@@ -54,7 +54,8 @@ def legacy_fields(result: dict[str, Any], question: str) -> dict[str, Any]:
 def persist_run(db, *, question: str, session_id: str, result: dict[str, Any],
                 user_id: int | None = None) -> int:
     """Store the exchange in chat history and an audit record in ``agent_runs``. Returns the message id."""
-    db.execute("INSERT INTO chat_messages (session_id, role, content) VALUES (?, 'user', ?)", (session_id, question))
+    db.execute("INSERT INTO chat_messages (session_id, role, content, user_id) VALUES (?, 'user', ?, ?)",
+               (session_id, question, user_id))
     meta = {k: result[k] for k in (
         "request_id", "intent", "status", "status_label", "confidence", "uncertainty_flag", "uncertainty_message",
         "blockers", "cautions", "checklist", "checklist_label", "inventory_status", "compatibility",
@@ -63,8 +64,9 @@ def persist_run(db, *, question: str, session_id: str, result: dict[str, Any],
     meta |= {k: v for k, v in legacy_fields(result, question).items() if k in (
         "evidence_status", "warnings", "mode", "requires_verification", "service_notice", "missing_terms")}
     cur = db.execute(
-        "INSERT INTO chat_messages (session_id, role, content, citations_json, meta_json) VALUES (?, 'assistant', ?, ?, ?)",
-        (session_id, result["response"], dumps(result["citations"]), dumps(meta)))
+        "INSERT INTO chat_messages (session_id, role, content, citations_json, meta_json, user_id) "
+        "VALUES (?, 'assistant', ?, ?, ?, ?)",
+        (session_id, result["response"], dumps(result["citations"]), dumps(meta), user_id))
     message_id = cur.lastrowid
     tools = [{k: t[k] for k in ("step", "tool", "ok", "duration_ms", "output_summary")} for t in result["agent_trace"]]
     citations = [{k: c[k] for k in ("chunk_id", "document", "page")} for c in result["citations"]]

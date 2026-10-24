@@ -11,11 +11,17 @@ const KIND = {
 };
 const RATING = { incorrect: ["warning", "Incorrect"], unsafe: ["critical", "Potentially unsafe"], outdated: ["warning", "Outdated"] };
 
-function Feed() {
-  const feed = useAsync(() => api.activity(), []);
+function Feed({ scope }) {
+  const feed = useAsync(() => api.activity(undefined, { mine: scope === "mine" }), [scope]);
   if (feed.error) return <ErrorState error={feed.error} onRetry={feed.reload} />;
   if (feed.loading) return <SkeletonRows rows={8} />;
-  if (!feed.data.length) return <EmptyState icon={Activity} title="No activity yet" />;
+  if (!feed.data.length) {
+    return scope === "mine" ? (
+      <EmptyState icon={Activity} title="No recent activity for your account yet.">
+        Comments you post, files you share, reviews assigned to you and changes you make appear here.
+      </EmptyState>
+    ) : <EmptyState icon={Activity} title="No lab activity yet" />;
+  }
   return (
     <ol className="card divide-y divide-line">
       {feed.data.map((i) => {
@@ -87,15 +93,24 @@ function ReviewQueue() {
 }
 
 export default function ActivityView({ route }) {
+  const { currentUser } = useApp();
   const [tab, setTab] = useState(route.query.tab === "review" ? "review" : "activity");
+  const [scope, setScope] = useState("mine");
+  // The whole lab's feed is for administrators; the API refuses mine=false for everyone else.
+  const canSeeLab = currentUser.role === "Admin";
+  const shownScope = canSeeLab ? scope : "mine";
   return (
     <Page width="max-w-4xl">
-      <PageHeader title="Recent activity" description="Document approvals, inventory changes, uploads and answers reported for expert review." />
-      <div className="mb-4">
+      <PageHeader title="Recent activity" description="Your approvals, changes, uploads and comments, plus answers reported for expert review." />
+      <div className="mb-4 flex flex-wrap items-center gap-2">
         <SegmentedControl label="Activity sections" value={tab} onChange={setTab}
           options={[{ id: "activity", label: "Activity log" }, { id: "review", label: "Answer review queue" }]} />
+        {tab === "activity" && canSeeLab && (
+          <SegmentedControl label="Whose activity" value={scope} onChange={setScope}
+            options={[{ id: "mine", label: "My Activity" }, { id: "lab", label: "Lab Activity" }]} />
+        )}
       </div>
-      {tab === "activity" ? <Feed /> : <ReviewQueue />}
+      {tab === "activity" ? <Feed scope={shownScope} /> : <ReviewQueue />}
     </Page>
   );
 }

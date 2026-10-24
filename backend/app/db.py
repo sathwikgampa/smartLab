@@ -204,6 +204,7 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     content TEXT NOT NULL,
     citations_json TEXT NOT NULL DEFAULT '[]',
     meta_json TEXT NOT NULL DEFAULT '{}',
+    user_id INTEGER,  -- users.id of the account that asked; NULL for anonymous use (auth disabled)
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_chat_session_id ON chat_messages(session_id, id);
@@ -335,6 +336,7 @@ INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_experiments_owner ON experiments(owner_id)",
     "CREATE INDEX IF NOT EXISTS idx_experiments_project ON experiments(project_id)",
     "CREATE INDEX IF NOT EXISTS idx_auth_sessions_expiry ON auth_sessions(expires_at)",
+    "CREATE INDEX IF NOT EXISTS idx_chat_user_session ON chat_messages(user_id, session_id, id)",
 )
 
 # Audit tables are append-only: the database itself rejects UPDATE and DELETE on them (GxP audit trail).
@@ -387,6 +389,20 @@ MIGRATIONS = {
         "ppe_warning": "TEXT",
         "organization_id": "INTEGER NOT NULL DEFAULT 1",
     },
+    "chat_messages": {
+        "user_id": "INTEGER",
+    },
+}
+
+# One-off data fixes, run only in the start-up that first adds the column: (table, column) -> (table the
+# fix reads from, SQL). Chat history from before per-user scoping is attributed through agent_runs, which
+# recorded the asking account per session; exchanges with no recorded account stay anonymous (NULL).
+BACKFILLS = {
+    ("chat_messages", "user_id"): (
+        "agent_runs",
+        "UPDATE chat_messages SET user_id = (SELECT CAST(r.user_id AS INTEGER) FROM agent_runs r "
+        "WHERE r.session_id = chat_messages.session_id AND r.user_id IS NOT NULL ORDER BY r.id LIMIT 1)",
+    ),
 }
 
 
@@ -777,27 +793,48 @@ def _pg_errors() -> type[BaseException] | tuple[type[BaseException], ...]:
     return psycopg2.Error
 
 
+def _columns(conn: sqlite3.Connection | PgConnection, table: str) -> set[str]:
+    if is_postgres(conn):
+        return {r[0] for r in conn.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() "
+            "AND table_name = ?", (table,))}
+    return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
+    added = []
     for table, columns in MIGRATIONS.items():
-        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        existing = _columns(conn, table)
         if not existing:
             continue  # table not created yet; SCHEMA creates it with every column
         for name, ddl in columns.items():
             if name not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+                added.append((table, name))
+    _backfill(conn, added)
     conn.commit()
 
 
 def _migrate_pg(conn: PgConnection) -> None:
+    added = []
     for table, columns in MIGRATIONS.items():
-        existing = {r[0] for r in conn.execute(
-            "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() "
-            "AND table_name = ?", (table,))}
+        existing = _columns(conn, table)
         if not existing:
             continue
         for name, ddl in columns.items():
             if name not in existing:
                 conn.executescript(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {name} {_pg_ddl(ddl)}")
+                added.append((table, name))
+    _backfill(conn, added)
+
+
+def _backfill(conn: sqlite3.Connection | PgConnection, added: list[tuple[str, str]]) -> None:
+    for key in added:
+        if key in BACKFILLS:
+            source, sql = BACKFILLS[key]
+            if _columns(conn, source):  # the source table may predate this database
+                conn.execute(sql)
+                logger.info("Backfilled %s.%s from %s", *key, source)
 
 
 def audit(conn: sqlite3.Connection, action: str, entity_type: str, entity_id: int | None, summary: str,

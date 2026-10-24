@@ -74,6 +74,18 @@ def _user_id() -> int | None:
     return (g.get("user") or {}).get("id")
 
 
+def _owned_by_caller(alias: str) -> tuple[str, tuple]:
+    """SQL condition (and its parameters) limiting ``chat_messages`` rows under ``alias`` to the caller's own.
+
+    Signed-in callers see only messages they asked; anonymous callers (possible only with
+    ``SMARTLAB_AUTH_REQUIRED`` off) see only anonymous messages, never an account's history.
+    """
+    user_id = _user_id()
+    if user_id is None:
+        return f"{alias}.user_id IS NULL", ()
+    return f"{alias}.user_id = ?", (user_id,)
+
+
 def _sse(event: str, payload: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
@@ -140,34 +152,42 @@ def record_message(session_id: str):
     data = json_body()
     require(data, "question", "answer")
     sid = session_id[:64]
-    execute("INSERT INTO chat_messages (session_id, role, content, meta_json) VALUES (?, 'user', ?, ?)",
-            (sid, str(data["question"])[:MAX_QUESTION_CHARS], dumps({"attachment": data.get("attachment")})))
+    user_id = _user_id()
+    execute("INSERT INTO chat_messages (session_id, role, content, meta_json, user_id) VALUES (?, 'user', ?, ?, ?)",
+            (sid, str(data["question"])[:MAX_QUESTION_CHARS], dumps({"attachment": data.get("attachment")}), user_id))
     msg_id = execute(
-        "INSERT INTO chat_messages (session_id, role, content, citations_json, meta_json) VALUES (?, 'assistant', ?, ?, ?)",
-        (sid, str(data["answer"])[:20000], dumps(data.get("citations") or []), dumps(data.get("meta") or {})))
+        "INSERT INTO chat_messages (session_id, role, content, citations_json, meta_json, user_id) "
+        "VALUES (?, 'assistant', ?, ?, ?, ?)",
+        (sid, str(data["answer"])[:20000], dumps(data.get("citations") or []), dumps(data.get("meta") or {}),
+         user_id))
     return jsonify({"session_id": sid, "message_id": msg_id}), 201
 
 
 @bp.get("/chat/sessions")
 def sessions():
-    """Recent conversations, newest first, titled by their first question."""
+    """The caller's recent conversations, newest first, titled by their first question."""
     limit = int_arg("limit", 20, 1, 100)
+    own_f, own_f_params = _owned_by_caller("f")
+    own_m, own_m_params = _owned_by_caller("m")
     return jsonify(query_all(
-        """
+        f"""
         SELECT session_id,
                (SELECT content FROM chat_messages f WHERE f.session_id = m.session_id AND f.role = 'user'
-                 ORDER BY f.id LIMIT 1) AS title,
+                   AND {own_f} ORDER BY f.id LIMIT 1) AS title,
                COUNT(*) AS message_count, MIN(created_at) AS started_at, MAX(created_at) AS updated_at, MAX(id) AS last_id
-          FROM chat_messages m GROUP BY session_id ORDER BY last_id DESC LIMIT ?
-        """, (limit,)))
+          FROM chat_messages m WHERE {own_m} GROUP BY session_id ORDER BY last_id DESC LIMIT ?
+        """, (*own_f_params, *own_m_params, limit)))
 
 
 @bp.get("/chat/<session_id>")
 def history(session_id: str):
-    rows = query_all("SELECT * FROM chat_messages WHERE session_id = ? ORDER BY id", (session_id[:64],))
+    own, own_params = _owned_by_caller("m")
+    rows = query_all(f"SELECT * FROM chat_messages m WHERE m.session_id = ? AND {own} ORDER BY m.id",
+                     (session_id[:64], *own_params))
     feedback = {r["message_id"]: r for r in query_all(
-        "SELECT * FROM answer_feedback WHERE message_id IN (SELECT id FROM chat_messages WHERE session_id = ?)",
-        (session_id[:64],))}
+        f"SELECT * FROM answer_feedback WHERE message_id IN "
+        f"(SELECT m.id FROM chat_messages m WHERE m.session_id = ? AND {own})",
+        (session_id[:64], *own_params))}
     for r in rows:
         r["citations"] = loads(r.pop("citations_json"), [])
         r["meta"] = loads(r.pop("meta_json"), {})
@@ -177,9 +197,11 @@ def history(session_id: str):
 
 @bp.delete("/chat/<session_id>")
 def delete_session(session_id: str):
-    if not query_one("SELECT 1 AS x FROM chat_messages WHERE session_id = ?", (session_id[:64],)):
-        raise ApiError("Conversation not found.", 404)
-    execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id[:64],))
+    own, own_params = _owned_by_caller("chat_messages")
+    params = (session_id[:64], *own_params)
+    if not query_one(f"SELECT 1 AS x FROM chat_messages WHERE session_id = ? AND {own}", params):
+        raise ApiError("Conversation not found.", 404)  # also for another account's conversation
+    execute(f"DELETE FROM chat_messages WHERE session_id = ? AND {own}", params)
     return "", 204
 
 

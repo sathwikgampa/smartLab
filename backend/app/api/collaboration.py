@@ -1,11 +1,13 @@
 """Collaboration: projects, threaded comments, shared files and an activity feed.
 
-Clients poll ``/api/activity?since=<timestamp>`` for near-real-time updates.
+Clients poll ``/api/activity?since=<timestamp>`` for near-real-time updates. The feed shows the caller's own
+activity by default; administrators can pass ``mine=false`` for the whole lab's.
 """
 from __future__ import annotations
 
 from flask import Blueprint, current_app, jsonify, request, send_file
 
+from ..auth import current_user
 from ..db import execute, query_all, query_one
 from ..security import SHARED_EXTENSIONS, validate_upload
 from .common import ApiError, int_arg, json_body, require, upload_limits
@@ -113,28 +115,65 @@ def download_file(file_id: int):
 
 
 # ---------------------------------------------------------------------- activity
+def _flag(name: str, default: bool) -> bool:
+    value = request.args.get(name)
+    if value is None or not value.strip():
+        return default
+    value = value.strip().lower()
+    if value in ("true", "1", "yes"):
+        return True
+    if value in ("false", "0", "no"):
+        return False
+    raise ApiError(f"{name} must be true or false.")
+
+
 @bp.get("/activity")
 def activity():
+    """Activity feed, newest first.
+
+    ``mine=true`` (the default) limits it to the signed-in user: audit entries recorded under their name or
+    email, their comments, files they shared and reviews assigned to them. Document uploads carry no uploader,
+    so they appear only in the lab view. ``mine=false`` returns the whole lab's activity and is reserved for
+    administrators. With no one signed in (``SMARTLAB_AUTH_REQUIRED`` off) there is no identity to filter on,
+    so the lab view is returned.
+    """
     since = request.args.get("since", "1970-01-01 00:00:00")
     limit = int_arg("limit", 30, 1, 200)
-    items = query_all(
-        """
+    mine = _flag("mine", True)
+    user = current_user()
+    if not mine and user is not None and user["role"] != "admin":
+        raise ApiError("Only lab administrators can view all lab activity.", 403)
+    personal = mine and user is not None
+
+    # Each branch is fixed SQL; only values travel as bind parameters.
+    branches: list[tuple[str, tuple]] = [
+        ("""
         SELECT 'comment' AS kind, c.id, c.created_at AS at, p.name AS actor, c.body AS summary,
                c.entity_type || ':' || c.entity_id AS ref
-          FROM comments c LEFT JOIN profiles p ON p.id = c.author_id WHERE c.created_at > ?
-        UNION ALL
+          FROM comments c LEFT JOIN profiles p ON p.id = c.author_id WHERE c.created_at > ?"""
+         + (" AND c.author_id = ?" if personal else ""),
+         (since, user["profile_id"]) if personal else (since,)),
+        ("""
         SELECT 'file', f.id, f.uploaded_at, p.name, f.original_name, 'project:' || f.project_id
-          FROM shared_files f LEFT JOIN profiles p ON p.id = f.uploaded_by WHERE f.uploaded_at > ?
-        UNION ALL
-        SELECT 'document', d.id, d.uploaded_at, NULL, d.title, 'document:' || d.id
-          FROM documents d WHERE d.uploaded_at > ?
-        UNION ALL
+          FROM shared_files f LEFT JOIN profiles p ON p.id = f.uploaded_by WHERE f.uploaded_at > ?"""
+         + (" AND f.uploaded_by = ?" if personal else ""),
+         (since, user["profile_id"]) if personal else (since,)),
+        ("""
         SELECT 'review', r.id, COALESCE(r.decided_at, r.created_at), p.name, r.checkpoint || ' - ' || r.status,
                'experiment:' || r.experiment_id
-          FROM reviews r LEFT JOIN profiles p ON p.id = r.reviewer_id WHERE COALESCE(r.decided_at, r.created_at) > ?
-        UNION ALL
+          FROM reviews r LEFT JOIN profiles p ON p.id = r.reviewer_id WHERE COALESCE(r.decided_at, r.created_at) > ?"""
+         + (" AND r.reviewer_id = ?" if personal else ""),
+         (since, user["profile_id"]) if personal else (since,)),
+        ("""
         SELECT 'audit', a.id, a.created_at, a.actor, a.summary, a.entity_type || ':' || COALESCE(CAST(a.entity_id AS TEXT), '')
-          FROM audit_log a WHERE a.created_at > ?
-        ORDER BY at DESC LIMIT ?
-        """, (since, since, since, since, since, limit))
-    return jsonify(items)
+          FROM audit_log a WHERE a.created_at > ?"""
+         + (" AND (a.actor = ? OR a.actor = ?)" if personal else ""),
+         (since, user["name"], user["email"]) if personal else (since,)),
+    ]
+    if not personal:
+        branches.insert(2, ("""
+        SELECT 'document', d.id, d.uploaded_at, NULL, d.title, 'document:' || d.id
+          FROM documents d WHERE d.uploaded_at > ?""", (since,)))
+    sql = "\n        UNION ALL".join(b[0] for b in branches) + "\n        ORDER BY at DESC LIMIT ?"
+    params = tuple(v for b in branches for v in b[1]) + (limit,)
+    return jsonify(query_all(sql, params))
