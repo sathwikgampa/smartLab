@@ -108,7 +108,7 @@ class ImageGenerator:
         self._openai_key = os.getenv("OPENAI_API_KEY") or None
         self._google_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or None
         self.openai_model = os.getenv("SMARTLAB_OPENAI_IMAGE_MODEL", "gpt-image-1")
-        self.imagen_model = os.getenv("SMARTLAB_IMAGEN_MODEL", "imagen-4.0-generate-001")
+        self.imagen_model = os.getenv("SMARTLAB_IMAGEN_MODEL", "imagen-3.0-generate-002")
         provider = (provider or "auto").strip().lower()
         if provider == "auto":
             provider = "openai" if self._openai_key else "google" if self._google_key else "off"
