@@ -31,6 +31,12 @@ def _load_env_file() -> None:
 
 _load_env_file()
 
+# Default Supabase PostgreSQL connection URI (used automatically when no .env or environment variable is set)
+DEFAULT_SUPABASE_URL = "postgresql://postgres.mdqojjvdxjlqbiymwxle:mkwajXpsOyMTsPam@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres"
+
+if not os.getenv("SMARTLAB_DATABASE_URL") and not os.getenv("DATABASE_URL"):
+    os.environ["SMARTLAB_DATABASE_URL"] = DEFAULT_SUPABASE_URL
+
 
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
@@ -58,14 +64,16 @@ def resolve_database(environ: dict[str, str] | None = None) -> tuple[str, str | 
 
     Returns ``(engine, url)`` where ``engine`` is ``"postgresql"`` or ``"sqlite"``. ``DATABASE_URL`` is a
     generic name other tools also set, so a non-PostgreSQL value there is ignored; a non-PostgreSQL
-    ``SMARTLAB_DATABASE_URL`` is a configuration error.
+    ``SMARTLAB_DATABASE_URL`` is a configuration error (set to 'sqlite' to explicitly use local SQLite).
     """
     env = os.environ if environ is None else environ
     explicit = (env.get("SMARTLAB_DATABASE_URL") or "").strip()
     if explicit:
+        if explicit.lower() == "sqlite":
+            return "sqlite", None
         if not is_postgres_url(explicit):
             raise ValueError("SMARTLAB_DATABASE_URL must be a postgresql:// or postgres:// URL "
-                             "(leave it unset to use the local SQLite database).")
+                             "(or 'sqlite' to use the local SQLite database).")
         return "postgresql", normalize_postgres_url(explicit)
     generic = (env.get("DATABASE_URL") or "").strip()
     if is_postgres_url(generic):
