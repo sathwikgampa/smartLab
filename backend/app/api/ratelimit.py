@@ -36,13 +36,13 @@ class RateLimiter:
             return True
 
 
-def rate_limited(group: str):
-    """Reject with 429 once a client exceeds ``AGENT_RATE_LIMIT_PER_MIN`` requests per minute in ``group``."""
+def rate_limited(group: str, limit_key: str = "AGENT_RATE_LIMIT_PER_MIN"):
+    """Reject with 429 once a client exceeds ``limit_key`` (a config value) requests per minute in ``group``."""
     def decorator(fn):
         @wraps(fn)
         def wrapper(*args, **kwargs):
             limiter = current_app.extensions.setdefault("smartlab_rate_limiter", RateLimiter())
-            limit = int(current_app.config.get("AGENT_RATE_LIMIT_PER_MIN", 20))
+            limit = int(current_app.config.get(limit_key, 20))
             if limit > 0 and not limiter.allow(f"{group}:{request.remote_addr}", limit):
                 raise ApiError("Too many requests. Please wait a minute and try again.", 429)
             return fn(*args, **kwargs)

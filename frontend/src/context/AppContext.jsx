@@ -13,7 +13,7 @@ const TOAST_ICON = {
 };
 
 /** Persisted per-browser preference; storage may be unavailable (private mode). */
-function usePref(key, initial) {
+export function usePref(key, initial) {
   const [value, setValue] = useState(() => {
     try { const raw = localStorage.getItem(key); return raw == null ? initial : JSON.parse(raw); } catch { return initial; }
   });

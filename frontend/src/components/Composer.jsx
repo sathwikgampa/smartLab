@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import { BookOpen, Boxes, Camera, FileSearch, FileText, Plus, SendHorizontal, UploadCloud, WifiOff, X } from "lucide-react";
 import { useApp } from "../context/AppContext";
 import { formatBytes } from "../lib/format";
+import { appendDictation } from "../lib/speech";
 import { MenuButton } from "./Popover";
 import { ProgressBar, Spinner } from "./ui";
+import { MicButton, VoiceHint, useDictationTarget, useVoice } from "./VoiceCoPilot";
 
 export const ATTACH_ACCEPT = ".pdf,.png,.jpg,.jpeg,.webp";
 const IMAGE_RE = /\.(png|jpe?g|webp)$/i;
@@ -94,6 +96,10 @@ export default function Composer({
   const [text, setText] = useState(initialText);
   const [error, setError] = useState(null);
   const ref = useRef(null);
+  // Mirrors `text` synchronously so a phrase dictated and sent in one breath is not lost to batching.
+  const textRef = useRef(text);
+  textRef.current = text;
+  const voice = useVoice();
 
   useEffect(() => {
     const el = ref.current;
@@ -111,17 +117,26 @@ export default function Composer({
     onAttach(file);
   };
 
-  const submit = () => {
-    const q = text.trim();
+  const submit = (value = text) => {
+    const q = value.trim();
     if (busy || offline || (!q && !attachment)) return;
     if (attachment?.kind === "image" && !q) {
       setError("Add a question about the image, for example \"What does this error display mean?\"");
       return;
     }
     setError(null);
+    voice?.noteQuestion();
     onSubmit(q);
     setText("");
+    textRef.current = "";
   };
+
+  // Spoken words land in this input; "send" and "clear" act on it.
+  useDictationTarget({
+    append: (phrase) => { textRef.current = appendDictation(textRef.current, phrase).slice(0, 2000); setText(textRef.current); },
+    submit: () => submit(textRef.current),
+    clear: () => { textRef.current = ""; setText(""); },
+  });
 
   const canSend = !busy && !offline && (text.trim() || attachment);
   return (
@@ -144,6 +159,7 @@ export default function Composer({
             placeholder={placeholder ?? "Ask about a procedure, document, experiment, or reagent..."}
             className="block max-h-[200px] min-h-[36px] flex-1 resize-none bg-transparent px-1.5 py-[7px] text-[0.9375rem] leading-[22px] text-ink placeholder:text-faint focus:outline-none disabled:opacity-60" />
           <CitationsToggle />
+          <MicButton />
           <button type="submit" disabled={!canSend}
             aria-label={offline ? "Send question (unavailable: server not reachable)" : "Send question"}
             title={offline ? "Server not reachable" : undefined}
@@ -152,6 +168,7 @@ export default function Composer({
           </button>
         </div>
       </form>
+      <VoiceHint />
       {offline && <p className="mt-2 flex items-center gap-1.5 text-xs text-warning-ink" role="status"><WifiOff className="h-3.5 w-3.5" aria-hidden="true" /> Server not reachable. Sending is paused until the connection is back.</p>}
       {error && <p role="alert" className="mt-2 text-xs text-critical">{error}</p>}
       {footer}

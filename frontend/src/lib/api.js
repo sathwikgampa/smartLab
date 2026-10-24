@@ -231,6 +231,16 @@ export const api = {
   uploadProjectFile: (id, file, uploadedBy) => upload(`/api/projects/${id}/files`, { file, uploaded_by: uploadedBy }),
   fileUrl: (id) => `${BASE}/api/files/${id}`,
 
+  // SmartLab Visualizer (scientific image generation)
+  visualizerInfo: () => request("/api/visualizer/info"),
+  generateImage: (payload, opts = {}) => request("/api/visualizer/generate", { method: "POST", body: payload, ...opts }),
+  generatedImages: (params = {}) => request(`/api/visualizer/images${qs(params)}`),
+  generatedImageUrl: (id, { download = false } = {}) => `${BASE}/api/visualizer/images/${id}/file${download ? "?download=1" : ""}`,
+  saveImageToProject: (id, projectId) =>
+    request(`/api/visualizer/images/${id}/save-to-project`, { method: "POST", body: { project_id: projectId } }),
+  attachImageToExperiment: (id, experimentId) =>
+    request(`/api/visualizer/images/${id}/attach-to-experiment`, { method: "POST", body: { experiment_id: experimentId } }),
+
   // Simulation, profiles, training
   simulations: () => request("/api/simulations"),
   runSimulation: (model, params) => request(`/api/simulations/${model}`, { method: "POST", body: { params } }),

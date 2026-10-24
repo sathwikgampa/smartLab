@@ -7,6 +7,7 @@ import { useApp } from "../context/AppContext";
 import { docKind } from "../lib/format";
 import { FeedbackControls } from "./Answer";
 import { ApprovalBadge, Badge, Markdown, Notice, Spinner } from "./ui";
+import { ReadAloudButton, joinSentences, useReadable, useVoice } from "./VoiceCoPilot";
 
 export const DECISION_SUPPORT_NOTE = "Decision support only. Confirm safety-critical steps with your lab supervisor.";
 const MATRIX_NOTE = "Limited demo matrix, not expert-reviewed.";
@@ -129,9 +130,37 @@ function CitationMarker({ n, citation, onClick }) {
   );
 }
 
-function Checklist({ msg, citations, onMarker }) {
+/** What "read answer" / "next step" walk through: warnings first, then summary, steps and cautions. */
+function copilotReadable(msg) {
+  const parts = [];
+  if (msg.status === "refused" && msg.blockers?.length) parts.push({ key: "blockers", label: "Refused", text: joinSentences(...msg.blockers) });
+  if (msg.uncertainty_flag && msg.uncertainty_message) parts.push({ key: "uncertain", label: "Uncertain", text: msg.uncertainty_message });
+  if (msg.summary) parts.push({ key: "summary", label: "Summary", text: msg.summary, quiet: true });
+  if (msg.checklist_label) parts.push({ key: "checklist-label", label: "Warning", text: msg.checklist_label });
+  for (const s of msg.checklist ?? []) {
+    parts.push({
+      key: `step-${s.step}`, label: `Step ${s.step}`,
+      text: joinSentences(s.action, s.unsupported && "This step is not supported by your documents", s.safety_note && `Safety: ${s.safety_note}`),
+    });
+  }
+  if (msg.diagnosis) {
+    const d = msg.diagnosis;
+    parts.push({ key: "diagnosis", label: `Error ${d.error_code}`, text: joinSentences(d.machine_model, `Probable cause: ${d.probable_cause}`, d.ppe_warnings?.length && `PPE: ${d.ppe_warnings.join(" ")}`) });
+  }
+  if (msg.cautions?.length) parts.push({ key: "cautions", label: "Caution", text: joinSentences(...msg.cautions) });
+  return { id: `answer-${msg.id}`, title: "Co-pilot answer", parts };
+}
+
+function Checklist({ msg, citations, onMarker, readableId }) {
   const byN = Object.fromEntries(citations.map((c) => [c.n, c]));
   const refused = msg.status === "refused";
+  // Follow the readout: highlight the step being read and keep it in view.
+  const reading = useVoice()?.reading;
+  const activeKey = reading?.id === readableId ? reading.key : null;
+  const stepRefs = useRef({});
+  useEffect(() => {
+    if (activeKey) stepRefs.current[activeKey]?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [activeKey]);
   return (
     <Section icon={ListChecks} title="Pre-Flight Checklist">
       {msg.checklist_label && (
@@ -141,7 +170,10 @@ function Checklist({ msg, citations, onMarker }) {
       )}
       <ol className={`space-y-2 ${refused ? "opacity-80" : ""}`}>
         {msg.checklist.map((s) => (
-          <li key={s.step} className={`rounded-lg border px-3 py-2.5 ${s.unsupported ? "border-critical/40 bg-critical-soft/40" : "border-line bg-surface"}`}>
+          <li key={s.step} ref={(el) => { stepRefs.current[`step-${s.step}`] = el; }}
+            aria-current={activeKey === `step-${s.step}` ? "step" : undefined}
+            className={`rounded-lg border px-3 py-2.5 transition-shadow ${s.unsupported ? "border-critical/40 bg-critical-soft/40" : "border-line bg-surface"} ${
+              activeKey === `step-${s.step}` ? "ring-2 ring-accent ring-offset-1" : ""}`}>
             <div className="flex gap-2.5">
               <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-subtle text-xs font-semibold tabular-nums">{s.step}</span>
               <div className="min-w-0 flex-1 space-y-1.5">
@@ -162,6 +194,7 @@ function Checklist({ msg, citations, onMarker }) {
                   </p>
                 )}
               </div>
+              <ReadAloudButton compact id={readableId} partKey={`step-${s.step}`} label={`Read step ${s.step} aloud`} />
             </div>
           </li>
         ))}
@@ -293,6 +326,8 @@ function CopilotAnswer({ msg, demo = false }) {
   const onMarker = (n) => { const c = citations.find((x) => x.n === n); if (c) open(c); };
   const refused = msg.status === "refused";
   const cautions = msg.cautions ?? [];
+  const readable = copilotReadable(msg);
+  useReadable(readable);
 
   return (
     <article className="space-y-4" aria-label="SmartLab co-pilot answer">
@@ -318,7 +353,7 @@ function CopilotAnswer({ msg, demo = false }) {
       {msg.summary && <Markdown>{msg.summary}</Markdown>}
 
       {msg.calculations?.length > 0 && <Calculations items={msg.calculations} />}
-      {msg.checklist?.length > 0 && <Checklist msg={msg} citations={citations} onMarker={onMarker} />}
+      {msg.checklist?.length > 0 && <Checklist msg={msg} citations={citations} onMarker={onMarker} readableId={readable.id} />}
 
       {msg.diagnosis && (
         <Section icon={Wrench} title={`Error ${msg.diagnosis.error_code}`}>
@@ -341,7 +376,8 @@ function CopilotAnswer({ msg, demo = false }) {
       {citations.length > 0 && <Citations citations={citations} highlighted={highlighted} onOpen={open} />}
       {msg.agent_trace?.length > 0 && <AgentTrace steps={msg.agent_trace} />}
       <p className="text-2xs text-muted">{DECISION_SUPPORT_NOTE}</p>
-      <FeedbackControls messageId={msg.message_id} text={msg.response ?? msg.answer} initial={msg.feedback} />
+      <FeedbackControls messageId={msg.message_id} text={msg.response ?? msg.answer} initial={msg.feedback}
+        readableId={readable.parts.length ? readable.id : null} />
     </article>
   );
 }

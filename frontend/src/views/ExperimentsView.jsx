@@ -178,11 +178,14 @@ function ExperimentDetail({ id, onChanged }) {
   );
 }
 
-export default function ExperimentsView() {
+export default function ExperimentsView({ route }) {
   const { toast, currentUser } = useApp();
   const list = useAsync(() => api.experiments(), []);
   const projects = useAsync(() => api.projects(), []);
-  const [selected, setSelected] = useState(null);
+  // "#/experiments/12" opens experiment 12 (e.g. after the Visualizer inserts a figure into its notes).
+  const linked = Number(route?.path[1]) || null;
+  const [selected, setSelected] = useState(linked);
+  useEffect(() => { if (linked) setSelected(linked); }, [linked]);
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({ title: "", objective: "", project_id: "", steps: "" });
 

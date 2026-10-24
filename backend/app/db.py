@@ -316,6 +316,33 @@ CREATE TABLE IF NOT EXISTS password_resets (
     used_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_password_resets_user ON password_resets(user_id);
+
+-- SmartLab Visualizer: every image generation attempt, including refused and failed ones (GxP prompt log).
+-- Append-only like audit_log: a record is never edited or removed once written. The PNG lives in
+-- UPLOAD_DIR/generated/<stored_name>; prompt is what the user typed, final_prompt what the provider received.
+CREATE TABLE IF NOT EXISTS generated_images (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    organization_id INTEGER NOT NULL DEFAULT 1,
+    user_id INTEGER REFERENCES users(id),
+    actor TEXT,
+    project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+    prompt TEXT NOT NULL,
+    final_prompt TEXT,
+    style TEXT NOT NULL,
+    aspect_ratio TEXT NOT NULL,
+    provider TEXT,
+    model TEXT,
+    status TEXT NOT NULL,
+    error TEXT,
+    stored_name TEXT,
+    mime_type TEXT,
+    width INTEGER,
+    height INTEGER,
+    size_bytes INTEGER,
+    sha256 TEXT,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 # Indexes for the hot query paths. Created one by one after SCHEMA, so a database from an older release
@@ -337,10 +364,11 @@ INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_experiments_project ON experiments(project_id)",
     "CREATE INDEX IF NOT EXISTS idx_auth_sessions_expiry ON auth_sessions(expires_at)",
     "CREATE INDEX IF NOT EXISTS idx_chat_user_session ON chat_messages(user_id, session_id, id)",
+    "CREATE INDEX IF NOT EXISTS idx_generated_images_user ON generated_images(user_id, id)",
 )
 
 # Audit tables are append-only: the database itself rejects UPDATE and DELETE on them (GxP audit trail).
-APPEND_ONLY_TABLES = ("audit_log", "agent_runs")
+APPEND_ONLY_TABLES = ("audit_log", "agent_runs", "generated_images")
 
 SQLITE_AUDIT_GUARD = "".join(
     f"""

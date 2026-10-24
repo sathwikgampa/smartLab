@@ -6,6 +6,7 @@ import { useApp } from "../context/AppContext";
 import { api } from "../lib/api";
 import { answerBody, copyText, docKind } from "../lib/format";
 import { ApprovalBadge, Badge, Markdown, Notice, Spinner } from "./ui";
+import { ReadAloudButton, markdownReadable, useReadable } from "./VoiceCoPilot";
 
 /* ------------------------------------------------------------ evidence state */
 const EVIDENCE = {
@@ -111,7 +112,7 @@ function SourceCards({ citations, onOpen }) {
 }
 
 /* ----------------------------------------------------------------- feedback */
-export function FeedbackControls({ messageId, text, initial }) {
+export function FeedbackControls({ messageId, text, initial, readableId }) {
   const { toast } = useApp();
   const [state, setState] = useState(initial?.rating ?? null);
   const [reporting, setReporting] = useState(false);
@@ -133,6 +134,7 @@ export function FeedbackControls({ messageId, text, initial }) {
   return (
     <div>
       <div className="flex flex-wrap items-center gap-1">
+        {readableId && <ReadAloudButton id={readableId} />}
         <button className="btn-ghost btn-sm" onClick={async () => { setCopied(await copyText(text)); setTimeout(() => setCopied(false), 1500); }}>
           {copied ? <Check className="h-3.5 w-3.5 text-success" /> : <Copy className="h-3.5 w-3.5" />} {copied ? "Copied" : "Copy"}
         </button>
@@ -193,6 +195,8 @@ export const AnswerMessage = memo(function AnswerMessage({ msg, question }) {
   const { openEvidence } = useApp();
   const citations = msg.citations ?? [];
   const onCite = (c) => openEvidence(c, citations);
+  const readableId = `answer-${msg.id}`;
+  useReadable(msg.evidence_status !== "insufficient" ? markdownReadable(readableId, "Answer", answerBody(msg.answer)) : null);
   return (
     <article className="space-y-3" aria-label="SmartLab answer">
       <div className="flex flex-wrap items-center gap-2">
@@ -208,7 +212,8 @@ export const AnswerMessage = memo(function AnswerMessage({ msg, question }) {
           <Markdown citations={citations} onCite={onCite}>{answerBody(msg.answer)}</Markdown>
         </section>
       )}
-      <FeedbackControls messageId={msg.message_id} text={msg.answer} initial={msg.feedback} />
+      <FeedbackControls messageId={msg.message_id} text={msg.answer} initial={msg.feedback}
+        readableId={msg.evidence_status !== "insufficient" ? readableId : null} />
     </article>
   );
 });
@@ -218,6 +223,14 @@ export function ImageAnswer({ msg }) {
   const r = msg.vision;
   const a = r.analysis;
   const matches = r.sop_matches ?? [];
+  const readableId = `image-${msg.id}`;
+  useReadable({
+    id: readableId, title: "Image analysis",
+    parts: [
+      { key: "visible", label: "What is visible", text: a.visual_description },
+      ...(r.troubleshooting ?? []).map((t) => ({ key: `fix-${t.id}`, label: `Documented fix${t.error_code ? ` for ${t.error_code}` : ""}`, text: t.fix })),
+    ].filter((p) => p.text),
+  });
   return (
     <article className="space-y-4" aria-label="Image analysis">
       <div className="flex flex-wrap items-center gap-2">
@@ -291,7 +304,7 @@ export function ImageAnswer({ msg }) {
         )}
       </section>
       <p className="text-xs text-muted">{r.disclaimer}</p>
-      <FeedbackControls messageId={msg.message_id} text={a.visual_description} />
+      <FeedbackControls messageId={msg.message_id} text={a.visual_description} readableId={readableId} />
     </article>
   );
 }

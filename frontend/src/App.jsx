@@ -21,6 +21,7 @@ const VIEWS = {
   troubleshooting: lazy(() => import("./views/TroubleshootingView")),
   experiments: lazy(() => import("./views/ExperimentsView")),
   data: lazy(() => import("./views/DataView")),
+  visualizer: lazy(() => import("./views/VisualizerView")),
   collaboration: lazy(() => import("./views/CollaborationView")),
   simulation: lazy(() => import("./views/SimulationView")),
   training: lazy(() => import("./views/LabTourView")),

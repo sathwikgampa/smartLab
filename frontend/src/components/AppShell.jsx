@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Activity, AlignLeft, BookOpen, Boxes, ChevronDown, FileText, FlaskConical, FolderPlus, House, Layers, MessageSquareText,
-  LogOut, Plus, Search, Settings, ShieldAlert, UserPlus, Wrench,
+  Activity, AlignLeft, BookOpen, Boxes, Check, ChevronDown, Copy, FileText, FlaskConical, FolderPlus, House, Layers, Link2,
+  MessageSquareText, LogOut, Plus, Search, Settings, ShieldAlert, UserPlus, Wrench,
 } from "lucide-react";
 import { useApp } from "../context/AppContext";
 import { api } from "../lib/api";
+import { copyText } from "../lib/format";
 import { navigate } from "../lib/router";
 import { Floating, MenuButton, useDismiss, useMenuKeys } from "./Popover";
 import { Dialog, Field } from "./ui";
+import { HandsFreeToggle, VoiceDock, VoiceProvider } from "./VoiceCoPilot";
 import { SkipLink } from "../site/SiteChrome";
 
 /* ----------------------------------------------------------------- navigation model */
@@ -22,7 +24,7 @@ export const MAIN_NAV = [
 export const NAV_GROUPS = [
   {
     id: "lab-ops", label: "Lab operations", icon: Wrench,
-    items: [{ id: "troubleshooting", label: "Troubleshooting" }, { id: "experiments", label: "Experiments" }, { id: "data", label: "Data analysis" }],
+    items: [{ id: "troubleshooting", label: "Troubleshooting" }, { id: "experiments", label: "Experiments" }, { id: "data", label: "Data analysis" }, { id: "visualizer", label: "Visualizer" }],
   },
   {
     id: "early", label: "Early features", hint: "Working prototypes with limited scope", icon: Layers,
@@ -300,30 +302,54 @@ function SearchPalette({ open, onClose }) {
   );
 }
 
-/** UI only: the server has no user accounts, so nothing is sent. */
+/** Sign-up link for this deployment; keeps the pathname so sub-path hosting still resolves. */
+const inviteLink = () => `${window.location.origin}${window.location.pathname}#/signup`;
+
+/** Share a sign-up link to this workspace by copying it to the clipboard. */
 function InviteDialog({ open, onClose }) {
   const { toast } = useApp();
-  const [email, setEmail] = useState("");
-  const [role, setRole] = useState("viewer");
-  useEffect(() => { if (open) { setEmail(""); setRole("viewer"); } }, [open]);
+  const [copied, setCopied] = useState(false);
+  const inputRef = useRef(null);
+  const resetTimer = useRef(null);
+  const link = useMemo(() => (open ? inviteLink() : ""), [open]);
+
+  useEffect(() => { if (open) setCopied(false); }, [open]);
+  useEffect(() => () => clearTimeout(resetTimer.current), []);
+
+  const copy = async () => {
+    clearTimeout(resetTimer.current);
+    if (await copyText(link)) {
+      setCopied(true);
+      toast("Invite link copied to clipboard.", "success");
+      resetTimer.current = setTimeout(() => setCopied(false), 2000);
+    } else {
+      // Clipboard API is blocked (insecure origin or denied permission): select the text for a manual copy.
+      inputRef.current?.select();
+      toast("Couldn't copy automatically. The link is selected: press Ctrl C to copy it.", "error");
+    }
+  };
+
   return (
-    <Dialog open={open} onClose={onClose} title="Invite to SmartLab" description="Share this workspace with a colleague."
-      footer={<>
-        <button className="btn-secondary" onClick={onClose}>Cancel</button>
-        <button className="btn-primary" form="invite-form" disabled={!/^\S+@\S+\.\S+$/.test(email)}>Send invite</button>
-      </>}>
-      <form id="invite-form" className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_9rem]"
-        onSubmit={(e) => { e.preventDefault(); onClose(); toast("Invites aren't available yet: the server has no user accounts, so nothing was sent.", "warning"); }}>
-        <Field label="Email address">{(id) => <input id={id} type="email" className="input" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@lab.org" required />}</Field>
-        <Field label="Role">
-          {(id) => (
-            <select id={id} className="input" value={role} onChange={(e) => setRole(e.target.value)}>
-              <option value="viewer">Viewer</option><option value="editor">Editor</option>
-            </select>
-          )}
-        </Field>
-      </form>
-      <p className="mt-3 text-xs text-muted">Invitations need user accounts on the server, which this build does not have yet.</p>
+    <Dialog open={open} onClose={onClose} title="Invite to SmartLab" description="Share this link with a colleague so they can create an account."
+      footer={<button className="btn-secondary" onClick={onClose}>Done</button>}>
+      <Field label="Invite link">
+        {(id) => (
+          <div className="flex gap-2">
+            <div className="relative min-w-0 flex-1">
+              <Link2 className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-faint" aria-hidden="true" />
+              <input ref={inputRef} id={id} type="text" readOnly value={link} onFocus={(e) => e.target.select()}
+                className="input bg-subtle pl-9 font-mono text-xs text-ink" spellCheck={false} />
+            </div>
+            <button type="button" onClick={copy} aria-label={copied ? "Invite link copied" : "Copy invite link"}
+              className={`btn-primary w-28 shrink-0 justify-center ${copied ? "!bg-success !text-white" : ""}`}>
+              {copied ? <Check className="h-4 w-4" aria-hidden="true" /> : <Copy className="h-4 w-4" aria-hidden="true" />}
+              {copied ? "Copied!" : "Copy"}
+            </button>
+          </div>
+        )}
+      </Field>
+      <p className="sr-only" role="status" aria-live="polite">{copied ? "Invite link copied to clipboard" : ""}</p>
+      <p className="mt-3 text-xs text-muted">Anyone with this link can sign up. New accounts get their own sign-in; workspace roles aren&rsquo;t assigned from the link.</p>
     </Dialog>
   );
 }
@@ -355,6 +381,7 @@ function TopBar({ current, route, label }) {
       <div className="hidden min-w-0 flex-1 justify-center px-2 sm:flex">{center}</div>
       <div className="flex-1 sm:hidden" />
       <div className="flex shrink-0 items-center gap-1.5">
+        <HandsFreeToggle />
         <button type="button" className="pill" onClick={() => setPaletteOpen(true)} aria-label="Search thread and records (Ctrl K)">
           <Search aria-hidden="true" /><span className="hidden lg:inline">Search thread</span>
         </button>
@@ -375,18 +402,21 @@ function TopBar({ current, route, label }) {
 export default function AppShell({ current, route, title, children, aside }) {
   useEffect(() => { document.title = title ? `${title} · SmartLab AI` : "SmartLab AI"; }, [title]);
   return (
-    <div className="h-full p-0 sm:p-3 lg:p-4">
-      <SkipLink target="main" />
-      <div className="flex h-full overflow-hidden border-line bg-surface shadow-panel sm:rounded-frame sm:border">
-        <Rail current={current} />
-        <div className="flex min-w-0 flex-1 flex-col">
-          <TopBar current={current} route={route} label={title} />
-          <div className="flex min-h-0 flex-1 bg-canvas">
-            <main id="main" tabIndex={-1} className="min-w-0 flex-1 overflow-y-auto outline-none">{children}</main>
-            {aside}
+    <VoiceProvider pages={ALL_NAV}>
+      <div className="h-full p-0 sm:p-3 lg:p-4">
+        <SkipLink target="main" />
+        <div className="flex h-full overflow-hidden border-line bg-surface shadow-panel sm:rounded-frame sm:border">
+          <Rail current={current} />
+          <div className="flex min-w-0 flex-1 flex-col">
+            <TopBar current={current} route={route} label={title} />
+            <div className="flex min-h-0 flex-1 bg-canvas">
+              <main id="main" tabIndex={-1} className="min-w-0 flex-1 overflow-y-auto outline-none">{children}</main>
+              {aside}
+            </div>
           </div>
         </div>
+        <VoiceDock />
       </div>
-    </div>
+    </VoiceProvider>
   );
 }

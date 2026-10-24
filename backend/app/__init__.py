@@ -17,6 +17,7 @@ from .rag.embeddings import get_embedder
 from .rag.engine import RAGEngine
 from .rag.vector_store import get_vector_store
 from .security import FileValidationError
+from .services.imagegen import ImageGenerator
 from .services.llm import ClaudeClient
 
 __version__ = "1.0.0"
@@ -35,6 +36,7 @@ def create_app(config_object: type[Config] | Config = Config, **overrides) -> Fl
     for key in ("DATA_DIR", "UPLOAD_DIR", "INDEX_DIR"):
         app.config[key].mkdir(parents=True, exist_ok=True)
     (app.config["UPLOAD_DIR"] / "shared").mkdir(exist_ok=True)
+    (app.config["UPLOAD_DIR"] / "generated").mkdir(exist_ok=True)
 
     # Credentials (the session cookie) are allowed only for the configured origins.
     CORS(app, resources={r"/api/*": {"origins": app.config["CORS_ORIGINS"]}}, supports_credentials=True)
@@ -47,7 +49,8 @@ def create_app(config_object: type[Config] | Config = Config, **overrides) -> Fl
         chunk_size=app.config["CHUNK_SIZE"], chunk_overlap=app.config["CHUNK_OVERLAP"],
         top_k=app.config["TOP_K"], min_score=app.config.get("MIN_EVIDENCE_SCORE"),
     )
-    app.extensions["smartlab"] = {"rag": rag, "llm": llm}
+    imagegen = ImageGenerator(app.config["IMAGE_PROVIDER"], app.config["IMAGE_TIMEOUT_S"], app.config["MAX_IMAGE_PIXELS"])
+    app.extensions["smartlab"] = {"rag": rag, "llm": llm, "imagegen": imagegen}
 
     app.logger.info("Database: %s", describe_database(app.config))
     conn = connect(database_target(app.config))
@@ -82,6 +85,7 @@ def create_app(config_object: type[Config] | Config = Config, **overrides) -> Fl
             "vector_store": store.backend,
             "indexed_chunks": len(store),
             "llm": {"enabled": llm.available, "model": llm.model if llm.available else None},
+            "image_generation": {"enabled": imagegen.available, "provider": imagegen.provider if imagegen.available else None},
             "min_evidence_score": rag.min_score,
             "literature_online": app.config["LITERATURE_ONLINE"],
             "max_upload_mb": app.config["MAX_CONTENT_LENGTH"] // (1024 * 1024),
@@ -115,10 +119,10 @@ def create_app(config_object: type[Config] | Config = Config, **overrides) -> Fl
 
 def _register_blueprints(app: Flask) -> None:
     from .api import (agent, auth, chat, collaboration, data, documents, experiments, literature, profiles, reagents,
-                      safety, search, simulation, troubleshooting, vision)
+                      safety, search, simulation, troubleshooting, vision, visualizer)
 
     for module in (agent, auth, chat, collaboration, data, documents, experiments, literature, profiles, reagents,
-                   safety, search, simulation, troubleshooting, vision):
+                   safety, search, simulation, troubleshooting, vision, visualizer):
         app.register_blueprint(module.bp)
 
 

@@ -153,6 +153,13 @@ class Config:
     AGENT_RATE_LIMIT_PER_MIN = int(os.getenv("SMARTLAB_AGENT_RATE_LIMIT_PER_MIN", "20"))
     AGENT_UPLOAD_MAX_MB = int(os.getenv("SMARTLAB_AGENT_UPLOAD_MAX_MB", "8"))
 
+    # SmartLab Visualizer (scientific image generation). auto | openai | google | off. "auto" uses
+    # OPENAI_API_KEY when set, else GOOGLE_API_KEY / GEMINI_API_KEY; with neither the feature is disabled.
+    IMAGE_PROVIDER = os.getenv("SMARTLAB_IMAGE_PROVIDER", "auto")
+    IMAGE_TIMEOUT_S = float(os.getenv("SMARTLAB_IMAGE_TIMEOUT_S", "120"))  # below Gunicorn's 150 s worker timeout
+    # Generations per minute per client (each one is a paid provider call).
+    IMAGE_RATE_LIMIT_PER_MIN = int(os.getenv("SMARTLAB_IMAGE_RATE_LIMIT_PER_MIN", "6"))
+
     CORS_ORIGINS = [
         o.strip()
         for o in os.getenv(
@@ -199,6 +206,7 @@ class TestConfig(Config):
     DATABASE_URL = None
     LLM_ENABLED = False
     LITERATURE_ONLINE = False
+    IMAGE_PROVIDER = "off"  # tests install a fake generator
     EMBEDDING_BACKEND = "hashing"
     VECTOR_BACKEND = "numpy"
     SEED_DEMO_DATA = True
