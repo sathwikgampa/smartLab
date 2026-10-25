@@ -164,10 +164,11 @@ class Config:
         o.strip()
         for o in os.getenv(
             "SMARTLAB_CORS_ORIGINS",
-            "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174,http://localhost:5175,http://127.0.0.1:5175,http://localhost:5176,http://127.0.0.1:5176,http://localhost:3000,http://127.0.0.1:3000,https://smart-lab-ai.onrender.com",
+            "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174,http://localhost:5175,http://127.0.0.1:5175,http://localhost:5176,http://127.0.0.1:5176,http://localhost:3000,http://127.0.0.1:3000,https://smart-lab-ai.onrender.com,https://smartlab-ai.onrender.com",
         ).split(",")
         if o.strip()
-    ] + [r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"]
+    ] + [r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$", r"^https://[a-zA-Z0-9-]+\.onrender\.com$"]
+
     SEED_DEMO_DATA = _env_bool("SMARTLAB_SEED_DEMO", True)
     # Number of trusted reverse-proxy hops in front of the app (Render: 1). 0 trusts no X-Forwarded-* header.
     TRUST_PROXY_HOPS = int(os.getenv("SMARTLAB_TRUST_PROXY_HOPS", "0"))
@@ -211,3 +212,5 @@ class TestConfig(Config):
     VECTOR_BACKEND = "numpy"
     SEED_DEMO_DATA = True
     SEED_AGENT_DEMO = False  # the co-pilot scenario tests opt in (tests/test_agent_scenarios.py)
+    PUBLIC_URL = "http://localhost:5173"
+

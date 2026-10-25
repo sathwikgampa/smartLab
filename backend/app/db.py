@@ -666,7 +666,17 @@ def _connect_raw(url: str):
     except ImportError as exc:  # pragma: no cover - dependency is in requirements.txt
         raise RuntimeError("A PostgreSQL URL is configured but psycopg2 is not installed "
                            "(pip install -r requirements.txt).") from exc
-    return psycopg2.connect(url, **_CONNECT_KWARGS)
+    import time
+    last_exc = None
+    for attempt in range(3):
+        try:
+            return psycopg2.connect(url, **_CONNECT_KWARGS)
+        except psycopg2.OperationalError as exc:
+            last_exc = exc
+            if attempt < 2:
+                time.sleep(1.0 * (attempt + 1))
+    raise last_exc
+
 
 
 class PgPool:

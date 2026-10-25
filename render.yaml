@@ -26,6 +26,9 @@ services:
         value: "true"
       - key: ANTHROPIC_API_KEY
         sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+
       # Render's proxy is the one hop in front of the app; it sets X-Forwarded-For / -Proto.
       - key: SMARTLAB_TRUST_PROXY_HOPS
         value: "1"
