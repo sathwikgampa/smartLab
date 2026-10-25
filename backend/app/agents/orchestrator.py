@@ -205,14 +205,19 @@ def _to_float(text: str) -> float:
 class _Names:
     """Known compound names (display names, synonyms, inventory lot names) for rules-based planning."""
 
-    def __init__(self, conn, organization_id: int):
+    def __init__(self, conn, organization_id: int, team_id: int | None = None):
         self.by_norm: dict[str, str] = {}
         for r in conn.execute("SELECT display_name, synonyms FROM compounds"):
             names = [r["display_name"], *[s for s in (r["synonyms"] or "").split(";") if s.strip()]]
             for n in names:
                 self.by_norm.setdefault(normalise_name(n), n.strip())
-        for r in conn.execute("SELECT name FROM reagents WHERE organization_id = ?", (organization_id,)):
-            self.by_norm.setdefault(normalise_name(r["name"]), r["name"])
+        if team_id is not None:
+            for r in conn.execute("SELECT name FROM reagents WHERE organization_id = ? AND team_id = ?",
+                                  (organization_id, team_id)):
+                self.by_norm.setdefault(normalise_name(r["name"]), r["name"])
+        else:
+            for r in conn.execute("SELECT name FROM reagents WHERE organization_id = ?", (organization_id,)):
+                self.by_norm.setdefault(normalise_name(r["name"]), r["name"])
         self.by_norm.pop("", None)
 
     def find_all(self, text: str) -> list[str]:
@@ -399,8 +404,8 @@ class Orchestrator:
         start = time.perf_counter()
         conn = self.env.open_conn()
         try:
-            names = _Names(conn, self.env.organization_id)
-            image_text = self._image_text(conn, upload_id, self.env.organization_id)
+            names = _Names(conn, self.env.organization_id, self.env.team_id)
+            image_text = self._image_text(conn, upload_id, self.env.organization_id, self.env.team_id)
         finally:
             conn.close()
         rules = rules_plan(question, names, upload_id=upload_id, error_code=error_code)
@@ -427,11 +432,15 @@ class Orchestrator:
         return plan
 
     @staticmethod
-    def _image_text(conn, upload_id: str | None, organization_id: int) -> str:
+    def _image_text(conn, upload_id: str | None, organization_id: int, team_id: int | None = None) -> str:
         if not upload_id:
             return ""
-        row = conn.execute("SELECT observed_text_json FROM agent_uploads WHERE upload_id = ? AND organization_id = ?",
-                           (upload_id, organization_id)).fetchone()
+        if team_id is not None:
+            row = conn.execute("SELECT observed_text_json FROM agent_uploads WHERE upload_id = ? AND organization_id = ? AND team_id = ?",
+                               (upload_id, organization_id, team_id)).fetchone()
+        else:
+            row = conn.execute("SELECT observed_text_json FROM agent_uploads WHERE upload_id = ? AND organization_id = ?",
+                               (upload_id, organization_id)).fetchone()
         return " | ".join(json.loads(row["observed_text_json"] or "[]"))[:1000] if row else ""
 
     @staticmethod

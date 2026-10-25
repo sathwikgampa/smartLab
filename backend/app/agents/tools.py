@@ -69,6 +69,7 @@ class ToolContext:
     rag: Any
     organization_id: int
     today: date
+    team_id: int | None = None
 
 
 # --------------------------------------------------------------------------- names
@@ -94,6 +95,10 @@ def _compound_names(c: dict[str, Any]) -> set[str]:
 
 
 def _org_lots(ctx: ToolContext) -> list[dict[str, Any]]:
+    if ctx.team_id is not None:
+        return [dict(r) for r in ctx.conn.execute(
+            "SELECT * FROM reagents WHERE organization_id = ? AND team_id = ? ORDER BY expiry_date, id",
+            (ctx.organization_id, ctx.team_id))]
     return [dict(r) for r in ctx.conn.execute(
         "SELECT * FROM reagents WHERE organization_id = ? ORDER BY expiry_date, id", (ctx.organization_id,))]
 
@@ -238,7 +243,7 @@ def tool_query_sop_knowledge(ctx: ToolContext, args: QuerySopArgs) -> ToolResult
     """Retrieve SOP passages (organisation-scoped) with similarity scores."""
     rag = ctx.rag
     retrieved, _ = resolve_versions(rag.retrieve(ctx.conn, args.query, k=args.k, document_ids=args.document_ids,
-                                                 organization_id=ctx.organization_id))
+                                                 organization_id=ctx.organization_id, team_id=ctx.team_id))
     chunks = [{
         "chunk_id": chunk_ref(e.chunk_id),
         "doc_name": e.document_title,
@@ -428,9 +433,12 @@ def tool_diagnose_hardware_error(ctx: ToolContext, args: DiagnoseArgs) -> ToolRe
     """
     upload = None
     if args.upload_id:
-        row = ctx.conn.execute(
-            "SELECT upload_id, equipment_type, observed_text_json, extracted_codes_json FROM agent_uploads "
-            "WHERE upload_id = ? AND organization_id = ?", (args.upload_id, ctx.organization_id)).fetchone()
+        upload_sql = "SELECT upload_id, equipment_type, observed_text_json, extracted_codes_json FROM agent_uploads WHERE upload_id = ? AND organization_id = ?"
+        upload_params: list[Any] = [args.upload_id, ctx.organization_id]
+        if ctx.team_id is not None:
+            upload_sql += " AND team_id = ?"
+            upload_params.append(ctx.team_id)
+        row = ctx.conn.execute(upload_sql, upload_params).fetchone()
         if row is None:
             return ToolResult.fail("Upload not found.")
         upload = {"upload_id": row["upload_id"], "equipment_type": row["equipment_type"],
@@ -447,9 +455,12 @@ def tool_diagnose_hardware_error(ctx: ToolContext, args: DiagnoseArgs) -> ToolRe
         return ToolResult(True, data, None, f"Read {', '.join(codes)} from the image; awaiting user confirmation.")
 
     code = normalise_code(args.error_code)
-    matches = [dict(r) for r in ctx.conn.execute(
-        "SELECT * FROM troubleshooting WHERE verified = 1 AND organization_id = ? AND error_code IS NOT NULL",
-        (ctx.organization_id,)) if normalise_code(r["error_code"]) == code]
+    ts_sql = "SELECT * FROM troubleshooting WHERE verified = 1 AND error_code IS NOT NULL AND organization_id = ?"
+    ts_params: list[Any] = [ctx.organization_id]
+    if ctx.team_id is not None:
+        ts_sql += " AND team_id = ?"
+        ts_params.append(ctx.team_id)
+    matches = [dict(r) for r in ctx.conn.execute(ts_sql, ts_params) if normalise_code(r["error_code"]) == code]
     data: dict[str, Any] = {"needs_confirmation": False, "error_code": code, "matches": [],
                             "resolution_steps": [], "ppe_warnings": [], "upload": upload}
     if not matches:
@@ -510,17 +521,19 @@ class ToolEnv:
     open_conn: Callable[[], Any]
     rag: Any
     organization_id: int
+    team_id: int | None = None
     timeout_s: float = 10.0
     today: date = field(default_factory=date.today)
 
     @classmethod
-    def from_app(cls, app, organization_id: int | None = None) -> "ToolEnv":
+    def from_app(cls, app, organization_id: int | None = None, team_id: int | None = None) -> "ToolEnv":
         cfg = app.config
         pool = app.extensions.get("smartlab_db_pool")
         target = database_target(cfg)
         return cls(open_conn=lambda: connect_readonly(target, pool),
                    rag=app.extensions["smartlab"]["rag"],
                    organization_id=cfg["DEFAULT_ORGANIZATION_ID"] if organization_id is None else organization_id,
+                   team_id=cfg.get("DEFAULT_TEAM_ID") if team_id is None else team_id,
                    timeout_s=cfg.get("AGENT_TOOL_TIMEOUT_S", 10.0))
 
 
@@ -530,7 +543,7 @@ _EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="agent-tool")
 def _invoke(spec: ToolSpec, args: _Args, env: ToolEnv) -> ToolResult:
     conn = env.open_conn()
     try:
-        return spec.fn(ToolContext(conn, env.rag, env.organization_id, env.today), args)
+        return spec.fn(ToolContext(conn, env.rag, env.organization_id, env.today, env.team_id), args)
     finally:
         conn.close()
 

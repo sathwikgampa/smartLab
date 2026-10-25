@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import secrets
 from datetime import timedelta
 
 from flask import Blueprint, current_app, jsonify, request
@@ -39,6 +40,7 @@ def signup():
     name = str(data.get("name") or "").strip()
     organization = str(data.get("organization") or "").strip() or None
     password = data.get("password")
+    invite_token = str(data.get("invite_token") or data.get("invite") or "").strip() or None
     if not name or len(name) > 120:
         raise ApiError("Enter your full name (up to 120 characters).", 400, field="name")
     email = _email(data)
@@ -55,22 +57,75 @@ def signup():
     transaction_lock(conn, "users")
     if conn.execute("SELECT 1 FROM users WHERE email = ?", (email,)).fetchone():
         raise ApiError("An account with this email already exists. Log in instead.", 409, field="email")
-    # The first account administers the workspace; later accounts are members.
-    role = "admin" if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0 else "member"
-    # Each account gets a researcher profile so comments, files and experiments are attributed to it.
-    profile_id = conn.execute(
-        "INSERT INTO profiles (name, role, title, expertise, avatar_color) VALUES (?, ?, ?, ?, ?)",
-        (name, "Lab admin" if role == "admin" else "Lab member", organization, None, "#6B4FD8"),
-    ).lastrowid
-    user_id = conn.execute(
-        "INSERT INTO users (email, name, organization, password_hash, role, profile_id, last_login_at, password_changed_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (email, name, organization, hash_password(password), role, profile_id, fmt_time(utc_now()), fmt_time(utc_now())),
-    ).lastrowid
-    audit(conn, "user_created", "user", user_id, f"Account created for {email} ({role})", actor=name)
-    token = create_session(conn, user_id)
-    conn.commit()
-    user = {"id": user_id, "email": email, "name": name, "organization": organization, "role": role, "profile_id": profile_id}
+
+    target_org_id = None
+    target_team_id = None
+    assigned_team_role = "owner"
+    inv_id = None
+
+    try:
+        if invite_token:
+            inv = conn.execute(
+                "SELECT * FROM organization_invitations WHERE token_hash = ?",
+                (token_hash(invite_token),),
+            ).fetchone()
+            if not inv or inv["used_at"] is not None or inv["expires_at"] < fmt_time(utc_now()):
+                raise ApiError("This invitation link is invalid or has expired.", 400, field="invite_token")
+            if inv["email"].lower() != email:
+                raise ApiError("This invitation was issued to a different email address.", 400, field="email")
+            target_org_id = inv["organization_id"]
+            target_team_id = inv["team_id"]
+            assigned_team_role = inv["role"] or "member"
+            inv_id = inv["id"]
+            org_row = conn.execute("SELECT id, name FROM organizations WHERE id = ?", (target_org_id,)).fetchone()
+            if org_row:
+                organization = org_row["name"]
+        else:
+            # Every new signup creates a separate organization/workspace and a default team.
+            # Typing an existing organization name must never grant access to that organization.
+            org_name = organization or f"{name}'s Lab"
+            base_slug = re.sub(r"[^a-z0-9]+", "-", org_name.lower()).strip("-") or "lab"
+            slug = f"{base_slug}-{secrets.token_hex(3)}"
+            target_org_id = conn.execute(
+                "INSERT INTO organizations (name, slug) VALUES (?, ?)",
+                (org_name, slug),
+            ).lastrowid
+            organization = org_name
+            target_team_id = conn.execute(
+                "INSERT INTO teams (organization_id, name, slug, is_default) VALUES (?, ?, ?, 1)",
+                (target_org_id, "General", "general"),
+            ).lastrowid
+            assigned_team_role = "owner"
+
+        # The first account administers the workspace; later accounts are members.
+        role = "admin" if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0 else "member"
+        # Each account gets a researcher profile so comments, files and experiments are attributed to it.
+        profile_id = conn.execute(
+            "INSERT INTO profiles (name, role, title, expertise, avatar_color) VALUES (?, ?, ?, ?, ?)",
+            (name, "Lab admin" if role == "admin" else "Lab member", organization, None, "#6B4FD8"),
+        ).lastrowid
+        user_id = conn.execute(
+            "INSERT INTO users (email, name, organization, organization_id, password_hash, role, profile_id, last_login_at, password_changed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (email, name, organization, target_org_id, hash_password(password), role, profile_id, fmt_time(utc_now()), fmt_time(utc_now())),
+        ).lastrowid
+
+        if target_team_id:
+            conn.execute(
+                "INSERT INTO team_memberships (team_id, user_id, role) VALUES (?, ?, ?)",
+                (target_team_id, user_id, assigned_team_role),
+            )
+
+        if inv_id:
+            conn.execute("UPDATE organization_invitations SET used_at = ? WHERE id = ?", (fmt_time(utc_now()), inv_id))
+
+        audit(conn, "user_created", "user", user_id, f"Account created for {email} ({role})", actor=name)
+        token = create_session(conn, user_id)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    user = {"id": user_id, "email": email, "name": name, "organization": organization, "organization_id": target_org_id, "role": role, "profile_id": profile_id}
     return set_session_cookie(jsonify({"user": public_user(user)}), token), 201
 
 
@@ -84,7 +139,7 @@ def login():
     _limit(f"login-ip:{client_ip()}", f"login-email:{email}")
 
     conn = get_db()
-    row = conn.execute("SELECT id, email, name, organization, role, profile_id, password_hash FROM users WHERE email = ?",
+    row = conn.execute("SELECT id, email, name, organization, organization_id, role, profile_id, password_hash FROM users WHERE email = ?",
                        (email,)).fetchone()
     row = dict(row) if row else None
     # verify_password runs a full hash comparison even for unknown emails (no timing difference).

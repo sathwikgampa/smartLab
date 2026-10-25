@@ -12,10 +12,11 @@ import uuid
 
 from flask import Blueprint, Response, current_app, g, jsonify, request
 
-from ..agents.service import legacy_fields, make_orchestrator, persist_run
+from ..agents.service import current_organization_id, legacy_fields, make_orchestrator, persist_run
 from ..agents.tools import ERROR_CODE, UPLOAD_ID
 from ..auth import actor_name
 from ..db import audit, dumps, execute, get_db, loads, query_all, query_one
+from ..tenancy import organization_id, team_id
 from .common import ApiError, int_arg, json_body, rag, require
 from .ratelimit import rate_limited
 
@@ -65,8 +66,12 @@ def chat():
     inp = _chat_input(json_body())
     orchestrator = make_orchestrator(document_ids=inp["document_ids"])
     result = orchestrator.run(inp["question"], upload_id=inp["upload_id"], error_code=inp["error_code"])
+    try:
+        active_team_id = team_id()
+    except Exception:
+        active_team_id = int(current_app.config.get("DEFAULT_TEAM_ID", 1))
     msg_id = persist_run(get_db(), question=inp["question"], session_id=inp["session_id"], result=result,
-                         user_id=_user_id())
+                         user_id=_user_id(), team_id=active_team_id, organization_id=current_organization_id())
     return jsonify(_response(inp, result, msg_id))
 
 
@@ -91,6 +96,11 @@ def chat_stream():
     inp = _chat_input(json_body())
     app = current_app._get_current_object()
     user_id = _user_id()
+    try:
+        active_team_id = team_id()
+    except Exception:
+        active_team_id = int(app.config.get("DEFAULT_TEAM_ID", 1))
+    org_id = current_organization_id()
     events: queue.Queue = queue.Queue()
     orchestrator = make_orchestrator(on_event=lambda kind, payload: events.put((kind, payload)),
                                      document_ids=inp["document_ids"])
@@ -101,7 +111,7 @@ def chat_stream():
             try:
                 result = orchestrator.run(inp["question"], upload_id=inp["upload_id"], error_code=inp["error_code"])
                 msg_id = persist_run(get_db(), question=inp["question"], session_id=inp["session_id"],
-                                     result=result, user_id=user_id)
+                                     result=result, user_id=user_id, team_id=active_team_id, organization_id=org_id)
                 events.put(("result", _response(inp, result, msg_id)))
             except Exception:  # noqa: BLE001 - details go to the log only
                 logger.exception("Streaming agent run failed")
@@ -140,34 +150,37 @@ def record_message(session_id: str):
     data = json_body()
     require(data, "question", "answer")
     sid = session_id[:64]
-    execute("INSERT INTO chat_messages (session_id, role, content, meta_json) VALUES (?, 'user', ?, ?)",
-            (sid, str(data["question"])[:MAX_QUESTION_CHARS], dumps({"attachment": data.get("attachment")})))
+    t_id = team_id()
+    execute("INSERT INTO chat_messages (team_id, session_id, role, content, meta_json) VALUES (?, ?, 'user', ?, ?)",
+            (t_id, sid, str(data["question"])[:MAX_QUESTION_CHARS], dumps({"attachment": data.get("attachment")})))
     msg_id = execute(
-        "INSERT INTO chat_messages (session_id, role, content, citations_json, meta_json) VALUES (?, 'assistant', ?, ?, ?)",
-        (sid, str(data["answer"])[:20000], dumps(data.get("citations") or []), dumps(data.get("meta") or {})))
+        "INSERT INTO chat_messages (team_id, session_id, role, content, citations_json, meta_json) VALUES (?, ?, 'assistant', ?, ?, ?)",
+        (t_id, sid, str(data["answer"])[:20000], dumps(data.get("citations") or []), dumps(data.get("meta") or {})))
     return jsonify({"session_id": sid, "message_id": msg_id}), 201
 
 
 @bp.get("/chat/sessions")
 def sessions():
     """Recent conversations, newest first, titled by their first question."""
+    t_id = team_id()
     limit = int_arg("limit", 20, 1, 100)
     return jsonify(query_all(
         """
         SELECT session_id,
-               (SELECT content FROM chat_messages f WHERE f.session_id = m.session_id AND f.role = 'user'
+               (SELECT content FROM chat_messages f WHERE f.session_id = m.session_id AND f.role = 'user' AND f.team_id = m.team_id
                  ORDER BY f.id LIMIT 1) AS title,
                COUNT(*) AS message_count, MIN(created_at) AS started_at, MAX(created_at) AS updated_at, MAX(id) AS last_id
-          FROM chat_messages m GROUP BY session_id ORDER BY last_id DESC LIMIT ?
-        """, (limit,)))
+          FROM chat_messages m WHERE m.team_id = ? GROUP BY session_id ORDER BY last_id DESC LIMIT ?
+        """, (t_id, limit)))
 
 
 @bp.get("/chat/<session_id>")
 def history(session_id: str):
-    rows = query_all("SELECT * FROM chat_messages WHERE session_id = ? ORDER BY id", (session_id[:64],))
+    t_id = team_id()
+    rows = query_all("SELECT * FROM chat_messages WHERE session_id = ? AND team_id = ? ORDER BY id", (session_id[:64], t_id))
     feedback = {r["message_id"]: r for r in query_all(
-        "SELECT * FROM answer_feedback WHERE message_id IN (SELECT id FROM chat_messages WHERE session_id = ?)",
-        (session_id[:64],))}
+        "SELECT * FROM answer_feedback WHERE message_id IN (SELECT id FROM chat_messages WHERE session_id = ? AND team_id = ?)",
+        (session_id[:64], t_id))}
     for r in rows:
         r["citations"] = loads(r.pop("citations_json"), [])
         r["meta"] = loads(r.pop("meta_json"), {})
@@ -177,9 +190,10 @@ def history(session_id: str):
 
 @bp.delete("/chat/<session_id>")
 def delete_session(session_id: str):
-    if not query_one("SELECT 1 AS x FROM chat_messages WHERE session_id = ?", (session_id[:64],)):
+    t_id = team_id()
+    if not query_one("SELECT 1 AS x FROM chat_messages WHERE session_id = ? AND team_id = ?", (session_id[:64], t_id)):
         raise ApiError("Conversation not found.", 404)
-    execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id[:64],))
+    execute("DELETE FROM chat_messages WHERE session_id = ? AND team_id = ?", (session_id[:64], t_id))
     return "", 204
 
 
@@ -187,7 +201,8 @@ def delete_session(session_id: str):
 @bp.post("/messages/<int:message_id>/feedback")
 def give_feedback(message_id: int):
     """Rate an answer. 'incorrect', 'unsafe' and 'outdated' ratings enter the expert review queue."""
-    msg = query_one("SELECT * FROM chat_messages WHERE id = ? AND role = 'assistant'", (message_id,))
+    t_id = team_id()
+    msg = query_one("SELECT * FROM chat_messages WHERE id = ? AND role = 'assistant' AND team_id = ?", (message_id, t_id))
     if msg is None:
         raise ApiError("Answer not found.", 404)
     data = json_body()
@@ -210,6 +225,7 @@ def give_feedback(message_id: int):
 
 @bp.get("/feedback")
 def feedback_queue():
+    t_id = team_id()
     status = request.args.get("status", "open")
     rows = query_all(
         """
@@ -217,9 +233,9 @@ def feedback_queue():
                (SELECT q.content FROM chat_messages q WHERE q.session_id = a.session_id AND q.role = 'user'
                   AND q.id < a.id ORDER BY q.id DESC LIMIT 1) AS question
           FROM answer_feedback f JOIN chat_messages a ON a.id = f.message_id
-         WHERE f.rating != 'helpful' AND (? = 'all' OR f.status = ?)
+         WHERE f.rating != 'helpful' AND (? = 'all' OR f.status = ?) AND a.team_id = ?
          ORDER BY f.id DESC
-        """, (status, status))
+        """, (status, status, t_id))
     for r in rows:
         r["citations"] = loads(r.pop("citations_json"), [])
     return jsonify(rows)
@@ -227,7 +243,10 @@ def feedback_queue():
 
 @bp.post("/feedback/<int:feedback_id>/resolve")
 def resolve_feedback(feedback_id: int):
-    item = query_one("SELECT * FROM answer_feedback WHERE id = ?", (feedback_id,))
+    t_id = team_id()
+    item = query_one(
+        "SELECT f.* FROM answer_feedback f JOIN chat_messages a ON a.id = f.message_id WHERE f.id = ? AND a.team_id = ?",
+        (feedback_id, t_id))
     if item is None:
         raise ApiError("Feedback item not found.", 404)
     if item["status"] != "open":
@@ -252,6 +271,6 @@ def vector_search():
     if not isinstance(k, int) or not 1 <= k <= 50:
         raise ApiError("k must be an integer between 1 and 50.")
     engine = rag()
-    hits = engine.retrieve(get_db(), str(data["query"]), k=k)
+    hits = engine.retrieve(get_db(), str(data["query"]), k=k, team_id=team_id())
     return jsonify({"query": data["query"], "min_score": engine.min_score,
                     "results": [h.to_dict() | {"is_evidence": h.score >= engine.min_score} for h in hits]})

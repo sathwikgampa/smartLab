@@ -129,3 +129,40 @@ def test_info_labels_matrix(client):
     info = client.get("/api/agent/info").get_json()
     assert info["compatibility_label"] == "Limited demo matrix, not expert-reviewed."
     assert info["compatibility_expert_reviewed"] is False
+
+
+def test_persist_run_fallback_compatibility(app, conn):
+    from app.agents.service import persist_run
+
+    fake_result = {
+        "request_id": "req-fake-12345",
+        "intent": "general",
+        "status": "supported",
+        "status_label": "Grounded in verified SOP",
+        "confidence": 0.95,
+        "uncertainty_flag": False,
+        "uncertainty_message": None,
+        "blockers": [],
+        "cautions": [],
+        "checklist": [],
+        "checklist_label": None,
+        "inventory_status": "ok",
+        "compatibility": None,
+        "compatibility_label": None,
+        "calculations": None,
+        "diagnosis": None,
+        "needs_confirmation": None,
+        "source_issues": [],
+        "quarantined_passages": [],
+        "agent_trace": [],
+        "response": "Test response",
+        "citations": [],
+        "llm_calls": 0,
+        "duration_ms": 10,
+        "started_at": "2026-10-24 12:00:00",
+    }
+    with app.app_context():
+        msg_id = persist_run(conn, question="Test question?", session_id="test-session-compat", result=fake_result)
+        assert msg_id is not None
+        row = conn.execute("SELECT team_id FROM chat_messages WHERE id = ?", (msg_id,)).fetchone()
+        assert row["team_id"] == 1

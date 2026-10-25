@@ -10,13 +10,15 @@ from ..db import audit, get_db, query_all, query_one
 from ..rag.engine import APPROVAL_STATUSES, DuplicateDocumentError, clean_metadata
 from ..rag.pdf_extractor import render_page_png
 from ..security import DOCUMENT_EXTENSIONS, validate_upload
+from ..tenancy import organization_id, require_team_access, team_id
 from .common import ApiError, int_arg, json_body, rag, upload_limits
 
 bp = Blueprint("documents", __name__, url_prefix="/api/documents")
 
 
 def _get_doc(doc_id: int) -> dict:
-    doc = query_one("SELECT * FROM documents WHERE id = ?", (doc_id,))
+    t_id = team_id()
+    doc = query_one("SELECT * FROM documents WHERE id = ? AND team_id = ?", (doc_id, t_id))
     if doc is None:
         raise ApiError("Document not found.", 404)
     return doc
@@ -30,8 +32,9 @@ SORTABLE = {"title", "doc_type", "category", "version", "owner", "approval_statu
 def list_documents():
     """List documents. Filters: ``q`` (title/code/owner), ``category``, ``status``, ``doc_type``;
     ``sort`` (allow-listed column) and ``order``."""
-    sql = "SELECT * FROM documents WHERE 1=1"
-    params: list = []
+    t_id = team_id()
+    sql = "SELECT * FROM documents WHERE team_id = ?"
+    params: list = [t_id]
     if request.args.get("q"):
         sql += " AND (title LIKE ? OR doc_code LIKE ? OR owner LIKE ? OR original_name LIKE ?)"
         params += [f"%{request.args['q']}%"] * 4
@@ -50,9 +53,10 @@ def list_documents():
 @bp.get("/facets")
 def facets():
     """Distinct categories/types for filter controls, plus the allowed approval statuses."""
+    t_id = team_id()
     return jsonify({
-        "categories": [r["category"] for r in query_all("SELECT DISTINCT category FROM documents ORDER BY category")],
-        "doc_types": [r["doc_type"] for r in query_all("SELECT DISTINCT doc_type FROM documents ORDER BY doc_type")],
+        "categories": [r["category"] for r in query_all("SELECT DISTINCT category FROM documents WHERE team_id = ? ORDER BY category", (t_id,))],
+        "doc_types": [r["doc_type"] for r in query_all("SELECT DISTINCT doc_type FROM documents WHERE team_id = ? ORDER BY doc_type", (t_id,))],
         "approval_statuses": list(APPROVAL_STATUSES),
     })
 
@@ -64,9 +68,12 @@ def upload_document():
     metadata = {k: form[k] for k in ("category", "doc_code", "version", "owner", "approval_status") if k in form}
     metadata.setdefault("approval_status", "unreviewed")  # nothing is approved implicitly on upload
     db = get_db()
+    t_id = team_id()
+    org_id = organization_id()
     try:
         doc = rag().ingest(db, validated, current_app.config["UPLOAD_DIR"], title=form.get("title"),
-                           doc_type=form.get("doc_type") or "SOP", metadata=metadata)
+                           doc_type=form.get("doc_type") or "SOP", metadata=metadata,
+                           team_id=t_id, organization_id=org_id)
     except DuplicateDocumentError as exc:
         raise ApiError(str(exc), 409, document=exc.existing) from exc
     except ValueError as exc:
@@ -126,11 +133,12 @@ def reindex_document(doc_id: int):
 @bp.get("/<int:doc_id>")
 def get_document(doc_id: int):
     doc = _get_doc(doc_id)
+    t_id = team_id()
     doc["pages"] = query_all(
         "SELECT page, COUNT(*) AS chunks FROM chunks WHERE document_id = ? GROUP BY page ORDER BY page", (doc_id,))
     doc["other_versions"] = query_all(
         "SELECT id, title, version, approval_status, updated_at FROM documents "
-        "WHERE doc_code = ? AND id != ? ORDER BY updated_at DESC", (doc["doc_code"], doc_id)) if doc["doc_code"] else []
+        "WHERE doc_code = ? AND id != ? AND team_id = ? ORDER BY updated_at DESC", (doc["doc_code"], doc_id, t_id)) if doc["doc_code"] else []
     doc["history"] = query_all(
         "SELECT action, summary, actor, created_at FROM audit_log WHERE entity_type = 'document' AND entity_id = ? "
         "ORDER BY id DESC LIMIT 20", (doc_id,))
@@ -138,6 +146,7 @@ def get_document(doc_id: int):
 
 
 @bp.delete("/<int:doc_id>")
+@require_team_access("admin")
 def delete_document(doc_id: int):
     doc = _get_doc(doc_id)
     db = get_db()

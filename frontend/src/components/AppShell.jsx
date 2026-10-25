@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Activity, AlignLeft, BookOpen, Boxes, ChevronDown, FileText, FlaskConical, FolderPlus, House, Layers, MessageSquareText,
-  LogOut, Plus, Search, Settings, ShieldAlert, UserPlus, Wrench,
+  Activity, AlignLeft, BookOpen, Boxes, Check, ChevronDown, Copy, FileText, FlaskConical, FolderPlus, House, Layers, MessageSquareText,
+  LogOut, Plus, Search, Settings, ShieldAlert, UserPlus, Users, Wrench,
 } from "lucide-react";
 import { useApp } from "../context/AppContext";
+import { useTeam } from "../context/TeamContext";
 import { api } from "../lib/api";
 import { navigate } from "../lib/router";
 import { Floating, MenuButton, useDismiss, useMenuKeys } from "./Popover";
@@ -300,31 +301,187 @@ function SearchPalette({ open, onClose }) {
   );
 }
 
-/** UI only: the server has no user accounts, so nothing is sent. */
-function InviteDialog({ open, onClose }) {
+/** Create Team Modal */
+function CreateTeamDialog({ open, onClose, onCreated }) {
   const { toast } = useApp();
-  const [email, setEmail] = useState("");
-  const [role, setRole] = useState("viewer");
-  useEffect(() => { if (open) { setEmail(""); setRole("viewer"); } }, [open]);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (open) {
+      setName("");
+      setDescription("");
+      setError(null);
+    }
+  }, [open]);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!name.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const created = await api.createTeam({ name: name.trim(), description: description.trim() || undefined });
+      toast(`Team "${created.name}" created!`, "success");
+      onCreated?.(created);
+      onClose();
+    } catch (err) {
+      setError(err.message || "Failed to create team.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
-    <Dialog open={open} onClose={onClose} title="Invite to SmartLab" description="Share this workspace with a colleague."
+    <Dialog open={open} onClose={onClose} title="Create team" description="Create a collaborative team inside your workspace."
       footer={<>
-        <button className="btn-secondary" onClick={onClose}>Cancel</button>
-        <button className="btn-primary" form="invite-form" disabled={!/^\S+@\S+\.\S+$/.test(email)}>Send invite</button>
+        <button type="button" className="btn-secondary" onClick={onClose} disabled={busy}>Cancel</button>
+        <button type="submit" form="create-team-form" className="btn-primary" disabled={busy || !name.trim()}>
+          {busy ? "Creating..." : "Create team"}
+        </button>
       </>}>
-      <form id="invite-form" className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_9rem]"
-        onSubmit={(e) => { e.preventDefault(); onClose(); toast("Invites aren't available yet: the server has no user accounts, so nothing was sent.", "warning"); }}>
-        <Field label="Email address">{(id) => <input id={id} type="email" className="input" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@lab.org" required />}</Field>
-        <Field label="Role">
-          {(id) => (
-            <select id={id} className="input" value={role} onChange={(e) => setRole(e.target.value)}>
-              <option value="viewer">Viewer</option><option value="editor">Editor</option>
-            </select>
-          )}
+      <form id="create-team-form" className="space-y-3" onSubmit={submit}>
+        {error && <p className="text-xs text-critical">{error}</p>}
+        <Field label="Team name">
+          {(id) => <input id={id} className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Molecular Biology" required autoFocus />}
+        </Field>
+        <Field label="Description (optional)">
+          {(id) => <textarea id={id} className="input h-20 resize-none py-1.5" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What does this team focus on?" />}
         </Field>
       </form>
-      <p className="mt-3 text-xs text-muted">Invitations need user accounts on the server, which this build does not have yet.</p>
     </Dialog>
+  );
+}
+
+/** Invite team members */
+function InviteDialog({ open, onClose }) {
+  const { toast } = useApp();
+  const { activeTeam, refreshTeams } = useTeam();
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState("member");
+  const [inviteUrl, setInviteUrl] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (open) {
+      setEmail("");
+      setRole("member");
+      setInviteUrl(null);
+      setError(null);
+      setCopied(false);
+    }
+  }, [open]);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!activeTeam) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api.createInvitation(activeTeam.id, { email: email.trim(), role });
+      setInviteUrl(res.invite_url);
+      toast(`Invitation generated for ${email}!`, "success");
+    } catch (err) {
+      setError(err.message || "Failed to create invitation.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copyLink = () => {
+    if (!inviteUrl) return;
+    navigator.clipboard.writeText(inviteUrl);
+    setCopied(true);
+    toast("Invitation link copied to clipboard!", "success");
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <Dialog open={open} onClose={onClose} title={`Invite to ${activeTeam ? activeTeam.name : "Team"}`}
+      description="Invite a colleague to join this team with a secure invitation link."
+      footer={<>
+        <button className="btn-secondary" onClick={onClose}>{inviteUrl ? "Done" : "Cancel"}</button>
+        {!inviteUrl && (
+          <button className="btn-primary" form="invite-form" disabled={busy || !/^\S+@\S+\.\S+$/.test(email)}>
+            {busy ? "Sending..." : "Create invitation"}
+          </button>
+        )}
+      </>}>
+      {inviteUrl ? (
+        <div className="space-y-3">
+          <p className="text-sm text-ink">Share this link with <strong className="text-accent-strong">{email}</strong>:</p>
+          <div className="flex items-center gap-2">
+            <input className="input flex-1 font-mono text-xs" readOnly value={inviteUrl} />
+            <button type="button" className="btn-primary flex items-center gap-1.5 shrink-0" onClick={copyLink}>
+              {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+              {copied ? "Copied" : "Copy"}
+            </button>
+          </div>
+          <p className="text-xs text-muted">This link expires in 7 days and can only be used once with this email address.</p>
+        </div>
+      ) : (
+        <form id="invite-form" className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_9rem]" onSubmit={submit}>
+          {error && <p className="col-span-full text-xs text-critical">{error}</p>}
+          <Field label="Email address">
+            {(id) => <input id={id} type="email" className="input" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@lab.org" required autoFocus />}
+          </Field>
+          <Field label="Team role">
+            {(id) => (
+              <select id={id} className="input" value={role} onChange={(e) => setRole(e.target.value)}>
+                <option value="viewer">Viewer</option>
+                <option value="member">Member</option>
+                <option value="admin">Admin</option>
+              </select>
+            )}
+          </Field>
+        </form>
+      )}
+    </Dialog>
+  );
+}
+
+function TeamSwitcher() {
+  const { teams, activeTeam, setActiveTeamId, refreshTeams } = useTeam();
+  const [createOpen, setCreateOpen] = useState(false);
+
+  if (!teams || teams.length === 0) return null;
+
+  return (
+    <>
+      <MenuButton
+        label={activeTeam ? activeTeam.name : "Select Team"}
+        placement="bottom-start"
+        width="w-60"
+        items={[
+          ...teams.map((t) => ({
+            id: String(t.id),
+            label: `${t.name}${t.is_default ? " (Default)" : ""}`,
+            icon: Users,
+            meta: t.role,
+          })),
+          { id: "__new__", label: "Create new team...", icon: Plus },
+        ]}
+        onSelect={(id) => {
+          if (id === "__new__") setCreateOpen(true);
+          else setActiveTeamId(Number(id));
+        }}
+        renderButton={({ ref, props, open }) => (
+          <button ref={ref} type="button" {...props} className="pill flex items-center gap-1.5 font-medium text-ink" aria-label="Switch active team">
+            <Users className="h-3.5 w-3.5 text-accent" aria-hidden="true" />
+            <span className="max-w-[130px] truncate">{activeTeam ? activeTeam.name : "Team"}</span>
+            <ChevronDown className="h-3 w-3 text-muted" aria-hidden="true" />
+          </button>
+        )}
+      />
+      <CreateTeamDialog open={createOpen} onClose={() => setCreateOpen(false)} onCreated={(team) => {
+        refreshTeams();
+        setActiveTeamId(team.id);
+      }} />
+    </>
   );
 }
 
@@ -349,6 +506,7 @@ function TopBar({ current, route, label }) {
   return (
     <header className="flex h-[52px] shrink-0 items-center gap-2 border-b border-line bg-surface px-3 sm:px-4">
       <div className="flex shrink-0 items-center gap-1.5">
+        <TeamSwitcher />
         <ScopePill />
         <ModePill />
       </div>
@@ -358,7 +516,7 @@ function TopBar({ current, route, label }) {
         <button type="button" className="pill" onClick={() => setPaletteOpen(true)} aria-label="Search thread and records (Ctrl K)">
           <Search aria-hidden="true" /><span className="hidden lg:inline">Search thread</span>
         </button>
-        <button type="button" className="pill" onClick={() => setInviteOpen(true)} aria-label="Invite">
+        <button type="button" className="pill" onClick={() => setInviteOpen(true)} aria-label="Invite to team">
           <UserPlus aria-hidden="true" /><span className="hidden lg:inline">Invite</span>
         </button>
         <button type="button" className="btn-dark" onClick={() => navigate("overview")} aria-label="New thread">

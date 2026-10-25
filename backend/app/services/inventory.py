@@ -81,9 +81,12 @@ def validate_payload(payload: dict[str, Any], partial: bool = False) -> dict[str
 
 def list_reagents(conn: sqlite3.Connection, *, search: str | None = None, status: str | None = None,
                   location: str | None = None, category: str | None = None, expiring_within: int | None = None,
-                  sort: str = "name", order: str = "asc") -> list[dict[str, Any]]:
+                  sort: str = "name", order: str = "asc", team_id: int | None = None) -> list[dict[str, Any]]:
     sql = "SELECT * FROM reagents WHERE 1=1"
     params: list[Any] = []
+    if team_id is not None:
+        sql += " AND team_id = ?"
+        params.append(team_id)
     if search:
         sql += (" AND (name LIKE ? OR cas_number LIKE ? OR catalog_number LIKE ? OR lot_number LIKE ? OR supplier LIKE ?"
                 " OR category LIKE ?)")
@@ -104,37 +107,46 @@ def list_reagents(conn: sqlite3.Connection, *, search: str | None = None, status
     return reagents
 
 
-def get_reagent(conn: sqlite3.Connection, reagent_id: int) -> dict[str, Any] | None:
-    row = conn.execute("SELECT * FROM reagents WHERE id = ?", (reagent_id,)).fetchone()
+def get_reagent(conn: sqlite3.Connection, reagent_id: int, team_id: int | None = None) -> dict[str, Any] | None:
+    if team_id is not None:
+        row = conn.execute("SELECT * FROM reagents WHERE id = ? AND team_id = ?", (reagent_id, team_id)).fetchone()
+    else:
+        row = conn.execute("SELECT * FROM reagents WHERE id = ?", (reagent_id,)).fetchone()
     return annotate(dict(row)) if row else None
 
 
-def create_reagent(conn: sqlite3.Connection, payload: dict[str, Any], actor: str | None = None) -> dict[str, Any]:
+def create_reagent(conn: sqlite3.Connection, payload: dict[str, Any], actor: str | None = None,
+                   team_id: int | None = None) -> dict[str, Any]:
     clean = validate_payload(payload)
+    if team_id is not None:
+        clean["team_id"] = team_id
     cols = ", ".join(clean)
     cur = conn.execute(f"INSERT INTO reagents ({cols}) VALUES ({', '.join('?' * len(clean))})", list(clean.values()))
     audit(conn, "create", "reagent", cur.lastrowid, f"Added reagent '{clean['name']}'", actor)
     conn.commit()
-    return get_reagent(conn, cur.lastrowid)
+    return get_reagent(conn, cur.lastrowid, team_id=team_id)
 
 
 def update_reagent(conn: sqlite3.Connection, reagent_id: int, payload: dict[str, Any],
-                   actor: str | None = None) -> dict[str, Any] | None:
+                   actor: str | None = None, team_id: int | None = None) -> dict[str, Any] | None:
     clean = validate_payload(payload, partial=True)
-    if not get_reagent(conn, reagent_id):
+    if not get_reagent(conn, reagent_id, team_id=team_id):
         return None
     if clean:
         sets = ", ".join(f"{k} = ?" for k in clean)
-        conn.execute(f"UPDATE reagents SET {sets} WHERE id = ?", [*clean.values(), reagent_id])
+        if team_id is not None:
+            conn.execute(f"UPDATE reagents SET {sets} WHERE id = ? AND team_id = ?", [*clean.values(), reagent_id, team_id])
+        else:
+            conn.execute(f"UPDATE reagents SET {sets} WHERE id = ?", [*clean.values(), reagent_id])
         audit(conn, "edit", "reagent", reagent_id, f"Edited {', '.join(clean)} of reagent #{reagent_id}", actor)
         conn.commit()
-    return get_reagent(conn, reagent_id)
+    return get_reagent(conn, reagent_id, team_id=team_id)
 
 
 def adjust_stock(conn: sqlite3.Connection, reagent_id: int, delta: float,
-                 actor: str | None = None) -> dict[str, Any] | None:
+                 actor: str | None = None, team_id: int | None = None) -> dict[str, Any] | None:
     """Consume (negative delta) or restock (positive). Stock may never go negative."""
-    reagent = get_reagent(conn, reagent_id)
+    reagent = get_reagent(conn, reagent_id, team_id=team_id)
     if reagent is None:
         return None
     new_qty = reagent["quantity"] + float(delta)
@@ -142,24 +154,32 @@ def adjust_stock(conn: sqlite3.Connection, reagent_id: int, delta: float,
         raise InventoryError(
             f"Cannot consume {abs(delta)} {reagent['unit']}; only {reagent['quantity']} {reagent['unit']} in stock."
         )
-    conn.execute("UPDATE reagents SET quantity = ? WHERE id = ?", (round(new_qty, 6), reagent_id))
+    if team_id is not None:
+        conn.execute("UPDATE reagents SET quantity = ? WHERE id = ? AND team_id = ?", (round(new_qty, 6), reagent_id, team_id))
+    else:
+        conn.execute("UPDATE reagents SET quantity = ? WHERE id = ?", (round(new_qty, 6), reagent_id))
     audit(conn, "stock", "reagent", reagent_id,
           f"{reagent['name']}: {'+' if delta > 0 else ''}{delta:g} {reagent['unit']} (now {new_qty:g} {reagent['unit']})", actor)
     conn.commit()
-    return get_reagent(conn, reagent_id)
+    return get_reagent(conn, reagent_id, team_id=team_id)
 
 
-def delete_reagent(conn: sqlite3.Connection, reagent_id: int, actor: str | None = None) -> bool:
-    reagent = get_reagent(conn, reagent_id)
-    cur = conn.execute("DELETE FROM reagents WHERE id = ?", (reagent_id,))
-    if reagent:
-        audit(conn, "delete", "reagent", reagent_id, f"Removed reagent '{reagent['name']}'", actor)
+def delete_reagent(conn: sqlite3.Connection, reagent_id: int, actor: str | None = None,
+                   team_id: int | None = None) -> bool:
+    reagent = get_reagent(conn, reagent_id, team_id=team_id)
+    if not reagent:
+        return False
+    if team_id is not None:
+        cur = conn.execute("DELETE FROM reagents WHERE id = ? AND team_id = ?", (reagent_id, team_id))
+    else:
+        cur = conn.execute("DELETE FROM reagents WHERE id = ?", (reagent_id,))
+    audit(conn, "delete", "reagent", reagent_id, f"Removed reagent '{reagent['name']}'", actor)
     conn.commit()
     return cur.rowcount > 0
 
 
-def summary(conn: sqlite3.Connection) -> dict[str, Any]:
-    reagents = list_reagents(conn)
+def summary(conn: sqlite3.Connection, team_id: int | None = None) -> dict[str, Any]:
+    reagents = list_reagents(conn, team_id=team_id)
     counts: dict[str, int] = {}
     for r in reagents:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
@@ -189,7 +209,7 @@ _GENERIC = set(tokenize(
 ))
 
 
-def natural_language_query(conn: sqlite3.Connection, question: str) -> dict[str, Any]:
+def natural_language_query(conn: sqlite3.Connection, question: str, *, team_id: int | None = None) -> dict[str, Any]:
     """Answer simple inventory questions ("how much ethanol is left?", "what expires soon?")."""
     intent = next((name for name, rx in _INTENTS if rx.search(question)), "stock")
     days = EXPIRING_SOON_DAYS
@@ -202,7 +222,7 @@ def natural_language_query(conn: sqlite3.Connection, question: str) -> dict[str,
         days = 30
 
     terms = [t for t in tokenize(question) if t not in _GENERIC and len(t) > 1]
-    reagents = list_reagents(conn)
+    reagents = list_reagents(conn, team_id=team_id)
 
     def matches(r: dict[str, Any]) -> bool:
         haystack = set(tokenize(" ".join(str(r.get(k) or "") for k in ("name", "cas_number", "catalog_number", "supplier"))))

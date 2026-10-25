@@ -25,7 +25,7 @@ from ..db import get_db
 log = logging.getLogger(__name__)
 
 # API paths reachable without signing in.
-PUBLIC_API = ("/api/health", "/api/auth/")
+PUBLIC_API = ("/api/health", "/api/auth/", "/api/invitations/")
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
@@ -52,7 +52,7 @@ def token_hash(token: str) -> str:
 def public_user(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": row["id"], "profile_id": row.get("profile_id"), "name": row["name"], "email": row["email"],
-        "organization": row.get("organization"), "role": row["role"],
+        "organization": row.get("organization"), "organization_id": row.get("organization_id", 1), "role": row["role"],
     }
 
 
@@ -75,7 +75,7 @@ def session_user(conn) -> dict[str, Any] | None:
     if not token or len(token) > 200:
         return None
     row = conn.execute(
-        "SELECT u.id, u.email, u.name, u.organization, u.role, u.profile_id, s.expires_at "
+        "SELECT u.id, u.email, u.name, u.organization, u.organization_id, u.role, u.profile_id, s.expires_at "
         "FROM auth_sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?",
         (token_hash(token),),
     ).fetchone()

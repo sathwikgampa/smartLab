@@ -25,6 +25,25 @@ logger = logging.getLogger(__name__)
 
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS organizations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS teams (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    organization_id INTEGER NOT NULL REFERENCES organizations(id),
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    description TEXT,
+    is_default INTEGER NOT NULL DEFAULT 0,
+    archived_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (organization_id, slug)
+);
+
 CREATE TABLE IF NOT EXISTS documents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     stored_name TEXT NOT NULL,
@@ -34,7 +53,7 @@ CREATE TABLE IF NOT EXISTS documents (
     page_count INTEGER NOT NULL DEFAULT 0,
     chunk_count INTEGER NOT NULL DEFAULT 0,
     size_bytes INTEGER NOT NULL DEFAULT 0,
-    sha256 TEXT NOT NULL UNIQUE,
+    sha256 TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'indexed',
     category TEXT NOT NULL DEFAULT 'General',
     doc_code TEXT,
@@ -43,6 +62,7 @@ CREATE TABLE IF NOT EXISTS documents (
     approval_status TEXT NOT NULL DEFAULT 'unreviewed',
     reviewed_at TEXT,
     organization_id INTEGER NOT NULL DEFAULT 1,
+    team_id INTEGER NOT NULL DEFAULT 1,
     uploaded_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -73,7 +93,8 @@ CREATE TABLE IF NOT EXISTS reagents (
     supplier TEXT,
     notes TEXT,
     compound_key TEXT,
-    organization_id INTEGER NOT NULL DEFAULT 1
+    organization_id INTEGER NOT NULL DEFAULT 1,
+    team_id INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS troubleshooting (
@@ -89,7 +110,8 @@ CREATE TABLE IF NOT EXISTS troubleshooting (
     verified INTEGER NOT NULL DEFAULT 1,
     machine_model TEXT,
     ppe_warning TEXT,
-    organization_id INTEGER NOT NULL DEFAULT 1
+    organization_id INTEGER NOT NULL DEFAULT 1,
+    team_id INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS profiles (
@@ -103,6 +125,8 @@ CREATE TABLE IF NOT EXISTS profiles (
 
 CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    organization_id INTEGER NOT NULL DEFAULT 1,
+    team_id INTEGER NOT NULL DEFAULT 1,
     name TEXT NOT NULL,
     description TEXT,
     owner_id INTEGER REFERENCES profiles(id),
@@ -111,6 +135,7 @@ CREATE TABLE IF NOT EXISTS projects (
 
 CREATE TABLE IF NOT EXISTS experiments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_id INTEGER NOT NULL DEFAULT 1,
     project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
     title TEXT NOT NULL,
     objective TEXT,
@@ -153,6 +178,7 @@ CREATE TABLE IF NOT EXISTS reviews (
 
 CREATE TABLE IF NOT EXISTS datasets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_id INTEGER NOT NULL DEFAULT 1,
     project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
     experiment_id INTEGER REFERENCES experiments(id) ON DELETE SET NULL,
     name TEXT NOT NULL,
@@ -164,6 +190,7 @@ CREATE TABLE IF NOT EXISTS datasets (
 
 CREATE TABLE IF NOT EXISTS comments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_id INTEGER NOT NULL DEFAULT 1,
     entity_type TEXT NOT NULL,
     entity_id INTEGER NOT NULL,
     parent_id INTEGER REFERENCES comments(id) ON DELETE CASCADE,
@@ -175,6 +202,7 @@ CREATE INDEX IF NOT EXISTS idx_comments_entity ON comments(entity_type, entity_i
 
 CREATE TABLE IF NOT EXISTS shared_files (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_id INTEGER NOT NULL DEFAULT 1,
     project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
     stored_name TEXT NOT NULL,
     original_name TEXT NOT NULL,
@@ -186,6 +214,7 @@ CREATE TABLE IF NOT EXISTS shared_files (
 
 CREATE TABLE IF NOT EXISTS equipment (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_id INTEGER NOT NULL DEFAULT 1,
     name TEXT NOT NULL,
     location TEXT,
     category TEXT,
@@ -199,6 +228,7 @@ CREATE TABLE IF NOT EXISTS equipment (
 
 CREATE TABLE IF NOT EXISTS chat_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_id INTEGER NOT NULL DEFAULT 1,
     session_id TEXT NOT NULL,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
@@ -221,6 +251,7 @@ CREATE TABLE IF NOT EXISTS answer_feedback (
 
 CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_id INTEGER DEFAULT 1,
     action TEXT NOT NULL,
     entity_type TEXT NOT NULL,
     entity_id INTEGER,
@@ -251,6 +282,7 @@ CREATE TABLE IF NOT EXISTS agent_uploads (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     upload_id TEXT NOT NULL UNIQUE,
     organization_id INTEGER NOT NULL DEFAULT 1,
+    team_id INTEGER NOT NULL DEFAULT 1,
     stored_name TEXT NOT NULL,
     mime_type TEXT NOT NULL,
     size_bytes INTEGER NOT NULL,
@@ -265,6 +297,7 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     request_id TEXT NOT NULL UNIQUE,
     organization_id INTEGER NOT NULL DEFAULT 1,
+    team_id INTEGER NOT NULL DEFAULT 1,
     user_id TEXT,
     session_id TEXT,
     question TEXT NOT NULL,
@@ -289,6 +322,8 @@ CREATE TABLE IF NOT EXISTS users (
     email TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
     organization TEXT,
+    organization_id INTEGER NOT NULL DEFAULT 1,
+    auth_user_id TEXT,
     password_hash TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT 'member',
     profile_id INTEGER REFERENCES profiles(id),
@@ -315,6 +350,30 @@ CREATE TABLE IF NOT EXISTS password_resets (
     used_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_password_resets_user ON password_resets(user_id);
+
+CREATE TABLE IF NOT EXISTS team_memberships (
+    team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('owner', 'admin', 'member', 'viewer')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (team_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_team_memberships_user ON team_memberships(user_id);
+
+CREATE TABLE IF NOT EXISTS organization_invitations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE,
+    email TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('owner', 'admin', 'member', 'viewer')),
+    token_hash TEXT NOT NULL UNIQUE,
+    invited_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL,
+    used_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_invitations_token ON organization_invitations(token_hash);
+CREATE INDEX IF NOT EXISTS idx_invitations_org_email ON organization_invitations(organization_id, email);
 """
 
 # Indexes for the hot query paths. Created one by one after SCHEMA, so a database from an older release
@@ -325,15 +384,29 @@ INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity_type, entity_id, id)",
     "CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at)",
     "CREATE INDEX IF NOT EXISTS idx_documents_org ON documents(organization_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_documents_team_sha256 ON documents(team_id, sha256)",
+    "CREATE INDEX IF NOT EXISTS idx_documents_team ON documents(team_id, updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_reagents_org_expiry ON reagents(organization_id, expiry_date, id)",
+    "CREATE INDEX IF NOT EXISTS idx_reagents_team ON reagents(team_id, expiry_date, id)",
     "CREATE INDEX IF NOT EXISTS idx_troubleshooting_verified_codes ON troubleshooting(organization_id, error_code) "
     "WHERE verified = 1 AND error_code IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_troubleshooting_team ON troubleshooting(team_id, error_code)",
+    "CREATE INDEX IF NOT EXISTS idx_equipment_team ON equipment(team_id)",
     "CREATE INDEX IF NOT EXISTS idx_steps_experiment ON experiment_steps(experiment_id, position)",
     "CREATE INDEX IF NOT EXISTS idx_variables_experiment ON experiment_variables(experiment_id)",
     "CREATE INDEX IF NOT EXISTS idx_reviews_experiment ON reviews(experiment_id)",
     "CREATE INDEX IF NOT EXISTS idx_reviews_reviewer_pending ON reviews(reviewer_id) WHERE status = 'pending'",
     "CREATE INDEX IF NOT EXISTS idx_experiments_owner ON experiments(owner_id)",
     "CREATE INDEX IF NOT EXISTS idx_experiments_project ON experiments(project_id)",
+    "CREATE INDEX IF NOT EXISTS idx_experiments_team ON experiments(team_id, updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_projects_team ON projects(team_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_datasets_team ON datasets(team_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_comments_team ON comments(team_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_shared_files_team ON shared_files(team_id, uploaded_at)",
+    "CREATE INDEX IF NOT EXISTS idx_chat_messages_team ON chat_messages(team_id, session_id, id)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_runs_team ON agent_runs(team_id, id)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_team ON audit_log(team_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_users_org ON users(organization_id)",
     "CREATE INDEX IF NOT EXISTS idx_auth_sessions_expiry ON auth_sessions(expires_at)",
 )
 
@@ -363,9 +436,47 @@ DO $$ BEGIN
 END $$;
 """ for t in APPEND_ONLY_TABLES)
 
+SQLITE_TENANT_GUARD = """
+CREATE TRIGGER IF NOT EXISTS team_memberships_keep_one_owner BEFORE DELETE ON team_memberships
+WHEN OLD.role = 'owner'
+  AND (SELECT COUNT(*) FROM team_memberships WHERE team_id = OLD.team_id AND role = 'owner' AND user_id != OLD.user_id) = 0
+  AND (SELECT 1 FROM teams WHERE id = OLD.team_id) IS NOT NULL
+BEGIN
+    SELECT RAISE(ABORT, 'team must keep at least one owner');
+END;
+
+CREATE TRIGGER IF NOT EXISTS team_memberships_keep_one_owner_update BEFORE UPDATE OF role, team_id ON team_memberships
+WHEN OLD.role = 'owner' AND (NEW.role != 'owner' OR NEW.team_id != OLD.team_id)
+  AND (SELECT COUNT(*) FROM team_memberships WHERE team_id = OLD.team_id AND role = 'owner' AND user_id != OLD.user_id) = 0
+  AND (SELECT 1 FROM teams WHERE id = OLD.team_id) IS NOT NULL
+BEGIN
+    SELECT RAISE(ABORT, 'team must keep at least one owner');
+END;
+""" + "".join(
+    f"""
+CREATE TRIGGER IF NOT EXISTS {t}_team_immutable BEFORE UPDATE OF team_id ON {t}
+WHEN NEW.team_id IS NOT OLD.team_id
+BEGIN
+    SELECT RAISE(ABORT, '{t}.team_id cannot change; re-create the row in the other team');
+END;
+""" for t in ("documents", "reagents", "troubleshooting", "equipment", "projects", "experiments",
+              "datasets", "comments", "shared_files", "chat_messages", "agent_uploads"))
+
+TEAM_TABLES = ("documents", "reagents", "troubleshooting", "equipment", "projects", "experiments", "datasets",
+               "comments", "shared_files", "chat_messages", "agent_uploads", "agent_runs", "audit_log")
+PG_TENANT_FKS = "".join(
+    f"""
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '{t}_team_id_fkey') THEN
+        ALTER TABLE {t} ADD CONSTRAINT {t}_team_id_fkey FOREIGN KEY (team_id) REFERENCES teams(id) NOT VALID;
+    END IF;
+END $$;
+""" for t in TEAM_TABLES)
+
 # Columns added after the first release; added to existing databases on start-up.
-# organization_id: there is no authentication yet, so every row belongs to the default organisation (1).
-# TODO(auth): set organization_id from the signed-in user's organisation when auth is added.
+# No REFERENCES here: SQLite refuses ADD COLUMN ... REFERENCES with a non-NULL default.
+# PostgreSQL gets the foreign keys from PG_TENANT_FKS.
+_TEAM = "INTEGER NOT NULL DEFAULT 1"
 MIGRATIONS = {
     "documents": {
         "category": "TEXT NOT NULL DEFAULT 'General'",
@@ -376,16 +487,33 @@ MIGRATIONS = {
         "reviewed_at": "TEXT",
         "updated_at": "TEXT",
         "organization_id": "INTEGER NOT NULL DEFAULT 1",
+        "team_id": _TEAM,
     },
     "reagents": {
         "category": "TEXT",
         "compound_key": "TEXT",
         "organization_id": "INTEGER NOT NULL DEFAULT 1",
+        "team_id": _TEAM,
     },
     "troubleshooting": {
         "machine_model": "TEXT",
         "ppe_warning": "TEXT",
         "organization_id": "INTEGER NOT NULL DEFAULT 1",
+        "team_id": _TEAM,
+    },
+    "equipment": {"team_id": _TEAM},
+    "projects": {"organization_id": "INTEGER NOT NULL DEFAULT 1", "team_id": _TEAM},
+    "experiments": {"team_id": _TEAM},
+    "datasets": {"team_id": _TEAM},
+    "comments": {"team_id": _TEAM},
+    "shared_files": {"team_id": _TEAM},
+    "chat_messages": {"team_id": _TEAM},
+    "agent_uploads": {"team_id": _TEAM},
+    "agent_runs": {"team_id": _TEAM},
+    "audit_log": {"team_id": "INTEGER DEFAULT 1"},
+    "users": {
+        "organization_id": "INTEGER NOT NULL DEFAULT 1",
+        "auth_user_id": "TEXT",
     },
 }
 
@@ -394,6 +522,8 @@ MIGRATIONS = {
 TABLES = re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", SCHEMA)
 # Tables with a generated ``id`` key (``lastrowid`` is emulated with ``RETURNING id`` for these).
 TABLES_WITH_ID = frozenset(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+) \(\s*id INTEGER PRIMARY KEY", SCHEMA))
+# Tables without a single surrogate ``id`` primary key (e.g. key-value stores or composite join tables).
+TABLES_WITHOUT_ID = frozenset(t for t in TABLES if t not in TABLES_WITH_ID)
 
 # ---------------------------------------------------------------- SQL dialect
 # SQLite's datetime('now') is UTC text 'YYYY-MM-DD HH:MM:SS'; produce exactly the same on PostgreSQL
@@ -742,6 +872,8 @@ def init_schema(conn: sqlite3.Connection | PgConnection) -> None:
         conn.executescript(PG_SCHEMA)
         _create_indexes(conn)
         conn.executescript(PG_AUDIT_GUARD)
+        ensure_default_tenant(conn)
+        conn.executescript(PG_TENANT_FKS)
         conn.commit()
         return
     # Older databases may lack the newer columns that the schema's indexes or
@@ -750,6 +882,8 @@ def init_schema(conn: sqlite3.Connection | PgConnection) -> None:
     conn.executescript(SCHEMA)
     _create_indexes(conn)
     conn.executescript(SQLITE_AUDIT_GUARD)
+    conn.executescript(SQLITE_TENANT_GUARD)
+    ensure_default_tenant(conn)
     conn.commit()
 
 
@@ -763,18 +897,37 @@ def _create_indexes(conn: sqlite3.Connection | PgConnection) -> None:
                 conn.executescript("RELEASE SAVEPOINT smartlab_index")
             else:
                 conn.execute(ddl)
-        except (sqlite3.OperationalError, _pg_errors()) as exc:
+        except (sqlite3.OperationalError, *_pg_errors()) as exc:
             if pg:
                 conn.executescript("ROLLBACK TO SAVEPOINT smartlab_index")
             logger.warning("Index skipped (older table layout): %s (%s)", ddl.split(" ON ")[0], exc)
 
 
-def _pg_errors() -> type[BaseException] | tuple[type[BaseException], ...]:
+def _pg_errors() -> tuple[type[BaseException], ...]:
     try:
         import psycopg2
     except ImportError:  # pragma: no cover - SQLite-only installs
         return ()
-    return psycopg2.Error
+    return (psycopg2.Error,)
+
+
+def ensure_default_tenant(conn: sqlite3.Connection | PgConnection) -> None:
+    """Default organisation and team (id 1, matching the column defaults) and, once, membership of
+    the default team for every existing user. Never removes anything."""
+    conn.execute("INSERT INTO organizations (id, name, slug) SELECT 1, 'Default organization', 'default' "
+                 "WHERE NOT EXISTS (SELECT 1 FROM organizations WHERE id = 1)")
+    conn.execute("INSERT INTO teams (id, organization_id, name, slug, is_default) SELECT 1, 1, 'General', 'general', 1 "
+                 "WHERE NOT EXISTS (SELECT 1 FROM teams WHERE id = 1)")
+    if is_postgres(conn):  # explicit ids don't advance identity sequences
+        for table in ("organizations", "teams"):
+            conn.execute(f"SELECT setval(pg_get_serial_sequence('{table}', 'id'), "
+                         f"GREATEST((SELECT MAX(id) FROM {table}), 1))")
+    # One-off: later runs must not re-add someone who was deliberately removed from every team.
+    if get_setting(conn, "tenancy_backfilled") != "true":
+        conn.execute("INSERT INTO team_memberships (team_id, user_id, role) "
+                     "SELECT 1, u.id, CASE WHEN u.role = 'admin' THEN 'owner' ELSE 'member' END FROM users u "
+                     "WHERE NOT EXISTS (SELECT 1 FROM team_memberships m WHERE m.user_id = u.id)")
+        set_setting(conn, "tenancy_backfilled", "true")
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -800,11 +953,15 @@ def _migrate_pg(conn: PgConnection) -> None:
                 conn.executescript(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {name} {_pg_ddl(ddl)}")
 
 
-def audit(conn: sqlite3.Connection, action: str, entity_type: str, entity_id: int | None, summary: str,
+def audit(conn: sqlite3.Connection | PgConnection, action: str, entity_type: str, entity_id: int | None, summary: str,
           actor: str | None = None) -> None:
     """Record a privileged change (approvals, inventory updates, reviews). Caller commits."""
-    conn.execute("INSERT INTO audit_log (action, entity_type, entity_id, summary, actor) VALUES (?, ?, ?, ?, ?)",
-                 (action, entity_type, entity_id, summary[:500], actor))
+    from flask import g, has_request_context
+    team = g.get("team") if has_request_context() else None
+    team_id = team["id"] if team and isinstance(team, dict) and "id" in team else None
+    conn.execute("INSERT INTO audit_log (action, entity_type, entity_id, summary, actor, team_id) "
+                 "VALUES (?, ?, ?, ?, ?, ?)",
+                 (action, entity_type, entity_id, summary[:500], actor, team_id))
 
 
 def get_setting(conn: sqlite3.Connection, key: str, default: str | None = None) -> str | None:

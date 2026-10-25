@@ -10,6 +10,7 @@ from flask import Blueprint, jsonify, request
 
 from ..db import dumps, execute, loads, query_all, query_one
 from ..security import validate_upload
+from ..tenancy import team_id
 from .common import ApiError, int_arg, json_body, require, upload_limits
 
 bp = Blueprint("data", __name__, url_prefix="/api/datasets")
@@ -31,7 +32,8 @@ def _coerce(value: Any) -> Any:
 
 
 def _dataset(ds_id: int) -> dict:
-    ds = query_one("SELECT * FROM datasets WHERE id = ?", (ds_id,))
+    t_id = team_id()
+    ds = query_one("SELECT * FROM datasets WHERE id = ? AND team_id = ?", (ds_id, t_id))
     if ds is None:
         raise ApiError("Dataset not found.", 404)
     ds["columns"] = loads(ds.pop("columns_json"), [])
@@ -68,8 +70,9 @@ def _validate_rows(columns: Any, rows: Any) -> tuple[list[str], list[dict]]:
 
 @bp.get("")
 def list_datasets():
+    t_id = team_id()
     rows = query_all("SELECT id, project_id, experiment_id, name, description, columns_json, rows_json, created_at "
-                     "FROM datasets ORDER BY id DESC")
+                     "FROM datasets WHERE team_id = ? ORDER BY id DESC", (t_id,))
     for r in rows:
         r["columns"] = loads(r.pop("columns_json"), [])
         r["row_count"] = len(loads(r.pop("rows_json"), []))
@@ -111,6 +114,7 @@ def get_dataset(ds_id: int):
 
 @bp.post("")
 def create_dataset():
+    t_id = team_id()
     if request.files.get("file"):
         validated = validate_upload(request.files["file"], {"csv"}, **upload_limits())
         reader = csv.DictReader(io.StringIO(validated.data.decode("utf-8-sig")))
@@ -128,9 +132,15 @@ def create_dataset():
         columns, rows = _validate_rows(data.get("columns"), data.get("rows", []))
         name, description = data["name"], data.get("description")
         project_id, experiment_id = data.get("project_id"), data.get("experiment_id")
+
+    if project_id and not query_one("SELECT id FROM projects WHERE id = ? AND team_id = ?", (project_id, t_id)):
+        raise ApiError("Project not found.", 404)
+    if experiment_id and not query_one("SELECT id FROM experiments WHERE id = ? AND team_id = ?", (experiment_id, t_id)):
+        raise ApiError("Experiment not found.", 404)
+
     ds_id = execute(
-        "INSERT INTO datasets (project_id, experiment_id, name, description, columns_json, rows_json) VALUES (?, ?, ?, ?, ?, ?)",
-        (project_id, experiment_id, str(name)[:200], description, dumps(columns), dumps(rows)),
+        "INSERT INTO datasets (team_id, project_id, experiment_id, name, description, columns_json, rows_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (t_id, project_id, experiment_id, str(name)[:200], description, dumps(columns), dumps(rows)),
     )
     return jsonify(_dataset(ds_id)), 201
 
@@ -143,12 +153,12 @@ def append_rows(ds_id: int):
     rows = ds["rows"] + new_rows
     if len(rows) > MAX_ROWS:
         raise ApiError(f"Datasets are limited to {MAX_ROWS} rows.", 413)
-    execute("UPDATE datasets SET rows_json = ? WHERE id = ?", (dumps(rows), ds_id))
+    execute("UPDATE datasets SET rows_json = ? WHERE id = ? AND team_id = ?", (dumps(rows), ds_id, team_id()))
     return jsonify(_dataset(ds_id))
 
 
 @bp.delete("/<int:ds_id>")
 def delete_dataset(ds_id: int):
     _dataset(ds_id)
-    execute("DELETE FROM datasets WHERE id = ?", (ds_id,))
+    execute("DELETE FROM datasets WHERE id = ? AND team_id = ?", (ds_id, team_id()))
     return "", 204

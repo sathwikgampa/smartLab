@@ -115,8 +115,12 @@ class RAGEngine:
 
     def ingest(self, conn: sqlite3.Connection, file: ValidatedFile, upload_dir: Path, *,
                title: str | None = None, doc_type: str = "SOP",
-               metadata: dict[str, Any] | None = None) -> dict[str, Any]:
-        existing = conn.execute("SELECT * FROM documents WHERE sha256 = ?", (file.sha256,)).fetchone()
+               metadata: dict[str, Any] | None = None,
+               team_id: int | None = None, organization_id: int | None = None) -> dict[str, Any]:
+        if team_id is not None:
+            existing = conn.execute("SELECT * FROM documents WHERE sha256 = ? AND team_id = ?", (file.sha256, team_id)).fetchone()
+        else:
+            existing = conn.execute("SELECT * FROM documents WHERE sha256 = ?", (file.sha256,)).fetchone()
         if existing:
             raise DuplicateDocumentError(dict(existing))
 
@@ -137,6 +141,12 @@ class RAGEngine:
                     "sha256", *meta]
             values = [file.stored_name, file.original_name, title[:200], doc_type[:40], len(pages), len(chunks),
                       file.size, file.sha256, *meta.values()]
+            if team_id is not None:
+                cols.append("team_id")
+                values.append(team_id)
+            if organization_id is not None:
+                cols.append("organization_id")
+                values.append(organization_id)
             cur = conn.execute(f"INSERT INTO documents ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
                                values)
             doc_id = cur.lastrowid
@@ -214,8 +224,9 @@ class RAGEngine:
 
     # ----------------------------------------------------------------- retrieval
     def retrieve(self, conn: sqlite3.Connection, query: str, k: int | None = None,
-                 document_ids: list[int] | None = None, organization_id: int | None = None) -> list[Evidence]:
-        """Top-k chunks for ``query``. ``document_ids`` and ``organization_id`` restrict the search space
+                 document_ids: list[int] | None = None, organization_id: int | None = None,
+                 team_id: int | None = None) -> list[Evidence]:
+        """Top-k chunks for ``query``. ``document_ids``, ``organization_id`` and ``team_id`` restrict the search space
         before ranking, so out-of-scope chunks can never be returned."""
         query = (query or "").strip()
         if not query:
@@ -229,7 +240,18 @@ class RAGEngine:
             if organization_id is not None:
                 sql += " AND d.organization_id = ?"
                 params.append(organization_id)
+            if team_id is not None:
+                sql += " AND d.team_id = ?"
+                params.append(team_id)
             allowed = {r[0] for r in conn.execute(sql, params)}
+            if not allowed:
+                return []
+        elif team_id is not None and organization_id is not None:
+            allowed = self._scoped_chunk_ids(conn, organization_id, team_id)
+            if not allowed:
+                return []
+        elif team_id is not None:
+            allowed = self._team_chunk_ids(conn, team_id)
             if not allowed:
                 return []
         elif organization_id is not None:
@@ -262,6 +284,24 @@ class RAGEngine:
         evidence.sort(key=rank, reverse=True)
         return evidence[:k]
 
+    def _scoped_chunk_ids(self, conn: sqlite3.Connection, organization_id: int, team_id: int) -> frozenset[int]:
+        key = (organization_id, team_id)
+        with self._scope_lock:
+            cached = self._scope_cache.get(key)
+        if cached is not None:
+            return cached
+        ids = frozenset(r[0] for r in conn.execute(
+            "SELECT c.id FROM chunks c JOIN documents d ON d.id = c.document_id WHERE d.organization_id = ? AND d.team_id = ?",
+            (organization_id, team_id)))
+        with self._scope_lock:
+            self._scope_cache[key] = ids
+        return ids
+
+    def _team_chunk_ids(self, conn: sqlite3.Connection, team_id: int) -> frozenset[int]:
+        return frozenset(r[0] for r in conn.execute(
+            "SELECT c.id FROM chunks c JOIN documents d ON d.id = c.document_id WHERE d.team_id = ?",
+            (team_id,)))
+
     def _org_chunk_ids(self, conn: sqlite3.Connection, organization_id: int) -> frozenset[int]:
         """Ids of the organisation's chunks, cached until the next index mutation in this process."""
         with self._scope_lock:
@@ -281,12 +321,13 @@ class RAGEngine:
 
     # ------------------------------------------------------------------- answers
     def answer(self, conn: sqlite3.Connection, question: str, k: int | None = None,
-               document_ids: list[int] | None = None) -> dict[str, Any]:
+               document_ids: list[int] | None = None, organization_id: int | None = None,
+               team_id: int | None = None) -> dict[str, Any]:
         question = (question or "").strip()
         if not question:
             raise ValueError("Question must not be empty.")
         guard = screen_query(question)
-        retrieved = self.retrieve(conn, question, k, document_ids)
+        retrieved = self.retrieve(conn, question, k, document_ids, organization_id=organization_id, team_id=team_id)
         evidence, source_issues = resolve_versions([e for e in retrieved if e.score >= self.min_score])
 
         if not evidence:

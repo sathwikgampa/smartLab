@@ -129,6 +129,31 @@ BEGIN
     RETURN v_team;
 END $$;
 
+-- Team creation: any authenticated member can create a team in their own organization.
+-- Created atomically with the caller as its owner.
+CREATE OR REPLACE FUNCTION smartlab.create_team(p_name text, p_slug text, p_description text DEFAULT NULL) RETURNS integer
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = '' AS $$
+DECLARE
+    v_user integer;
+    v_org integer;
+    v_team integer;
+BEGIN
+    v_user := smartlab.current_user_id();
+    IF v_user IS NULL THEN
+        RAISE EXCEPTION 'Authentication required' USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    SELECT u.organization_id INTO v_org FROM public.users u WHERE u.id = v_user;
+    IF v_org IS NULL THEN
+        RAISE EXCEPTION 'User has no organization' USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    INSERT INTO public.teams (organization_id, name, slug, description, is_default)
+    VALUES (v_org, p_name, p_slug, p_description, 0)
+    RETURNING id INTO v_team;
+    INSERT INTO public.team_memberships (team_id, user_id, role)
+    VALUES (v_team, v_user, 'owner');
+    RETURN v_team;
+END $$;
+
 -- ------------------------------------------------------------------------------- column defaults
 -- An INSERT that omits team_id lands in the transaction's active team rather than silently in team 1.
 -- Owner connections (seeding, and today's app before it becomes team-aware) have no active team and keep
@@ -262,20 +287,25 @@ CREATE POLICY answer_feedback_delete ON public.answer_feedback FOR DELETE
 -- ------------------------------------------------------------------------------- tenancy tables
 ALTER TABLE public.organizations ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS organizations_select ON public.organizations;
+DROP POLICY IF EXISTS organizations_app ON public.organizations;
 CREATE POLICY organizations_select ON public.organizations FOR SELECT
     USING (id = (SELECT smartlab.current_org_id()));
--- No write policies: organizations are created by the owner (support / migrations).
+CREATE POLICY organizations_app ON public.organizations TO smartlab_app
+    USING (true) WITH CHECK (true);
 
 ALTER TABLE public.teams ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS teams_select ON public.teams;
 DROP POLICY IF EXISTS teams_insert ON public.teams;
 DROP POLICY IF EXISTS teams_update ON public.teams;
+DROP POLICY IF EXISTS teams_app ON public.teams;
 -- Org admins also see their org's archived teams, and a team they have just created: the app appends
 -- RETURNING id to INSERTs, and team_ids() is computed when the statement starts, before the row exists.
 CREATE POLICY teams_select ON public.teams FOR SELECT
     USING (id = ANY ((SELECT smartlab.team_ids('viewer'))::integer[]) OR smartlab.is_org_admin(organization_id));
 CREATE POLICY teams_insert ON public.teams FOR INSERT
     WITH CHECK (smartlab.is_org_admin(organization_id) AND is_default = 0);
+CREATE POLICY teams_app ON public.teams TO smartlab_app FOR INSERT
+    WITH CHECK (true);
 CREATE POLICY teams_update ON public.teams FOR UPDATE
     USING (id = ANY ((SELECT smartlab.team_ids('admin'))::integer[]))
     WITH CHECK (id = ANY ((SELECT smartlab.team_ids('admin'))::integer[])
@@ -312,7 +342,7 @@ CREATE POLICY team_memberships_delete ON public.team_memberships FOR DELETE
 DO $$
 DECLARE t text;
 BEGIN
-    FOREACH t IN ARRAY ARRAY['users', 'auth_sessions', 'password_resets', 'profiles', 'settings', 'compounds'] LOOP
+    FOREACH t IN ARRAY ARRAY['users', 'auth_sessions', 'password_resets', 'organization_invitations', 'profiles', 'settings', 'compounds'] LOOP
         EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
         EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', t || '_app', t);
         EXECUTE format('CREATE POLICY %I ON public.%I TO smartlab_app USING (true) WITH CHECK (true)', t || '_app', t);
@@ -325,7 +355,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO smartlab_
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO smartlab_app;
 -- Belt and braces on top of RLS: the audit trail is append-only, tenants are archived not deleted.
 REVOKE UPDATE, DELETE ON public.audit_log, public.agent_runs FROM smartlab_app;
-REVOKE INSERT, UPDATE, DELETE ON public.organizations FROM smartlab_app;
+REVOKE UPDATE, DELETE ON public.organizations FROM smartlab_app;
 REVOKE DELETE ON public.teams FROM smartlab_app;
 -- Tables that init_schema() creates in future releases get the same grants.
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO smartlab_app;

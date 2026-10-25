@@ -206,6 +206,14 @@ def test_diagnose_upload_from_other_org_is_not_found(env, conn):
     assert not r.ok and r.error == "Upload not found."
 
 
+def test_diagnose_hardware_error_from_other_org_is_not_found(env, conn):
+    conn.execute("INSERT INTO troubleshooting (organization_id, team_id, equipment, symptom, keywords, probable_cause, fix, error_code, verified) "
+                 "VALUES (2, 1, 'HPLC', 'Error E-999', 'hplc, filter', 'Filter leak', 'Replace filter.', 'E-999', 1)")
+    conn.commit()
+    r = ok("diagnose_hardware_error", {"error_code": "E-999"}, env)
+    assert r.ok and r.data["matches"] == []
+
+
 # ------------------------------------------------------------------ runner guarantees
 def test_unknown_tool_and_extra_args_rejected(env):
     assert not ok("delete_everything", {}, env).ok

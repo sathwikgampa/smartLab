@@ -151,13 +151,25 @@ export function LoginPage({ route }) {
 }
 
 /* -------------------------------------------------------------------------- sign up */
-export function SignupPage() {
+export function SignupPage({ route }) {
   useTitle("Create your account");
   const { setAccount } = useApp();
+  const inviteToken = route?.query?.invite || route?.query?.token || "";
+  const [inviteInfo, setInviteInfo] = useState(null);
   const [form, setForm] = useState({ name: "", email: "", organization: "", password: "", confirm: "", accepted: false });
   const [errors, setErrors] = useState({});
   const [formError, setFormError] = useState(null);
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (inviteToken) {
+      api.invitationDetails(inviteToken).then((data) => {
+        setInviteInfo(data);
+        if (data?.email) setForm((f) => ({ ...f, email: data.email, organization: data.organization_name || f.organization }));
+      }).catch(() => {});
+    }
+  }, [inviteToken]);
+
   const set = (k) => (e) => {
     setForm((f) => ({ ...f, [k]: e.target.type === "checkbox" ? e.target.checked : e.target.value }));
     setErrors((errs) => ({ ...errs, [k]: undefined }));
@@ -179,7 +191,14 @@ export function SignupPage() {
     if (Object.keys(next).length) return;
     setBusy(true);
     try {
-      const { user } = await api.signup({ name: form.name.trim(), email: form.email.trim(), organization: form.organization.trim(), password: form.password, accepted: true });
+      const { user } = await api.signup({
+        name: form.name.trim(),
+        email: form.email.trim(),
+        organization: form.organization.trim(),
+        password: form.password,
+        accepted: true,
+        invite_token: inviteToken || undefined,
+      });
       setAccount(user);
       navigate("overview", { replace: true });
     } catch (err) {
@@ -189,8 +208,17 @@ export function SignupPage() {
   };
 
   return (
-    <AuthCard title="Create your account" subtitle="Join SmartLab AI to get started"
+    <AuthCard title="Create your account" subtitle={inviteInfo ? `You've been invited to join ${inviteInfo.organization_name}` : "Join SmartLab AI to get started"}
       footer={<>Already have an account? <a className="link" href="#/login">Log in</a></>}>
+      {inviteInfo && (
+        <div className="mb-4 rounded-lg border border-accent/30 bg-accent/10 p-3 text-xs text-ink">
+          <p className="font-semibold text-accent-strong">Team Invitation</p>
+          <p className="mt-0.5 text-muted">
+            Joining <strong className="text-ink">{inviteInfo.organization_name}</strong>
+            {inviteInfo.team_name ? ` (Team: ${inviteInfo.team_name})` : ""} as <strong className="text-ink">{inviteInfo.role}</strong>.
+          </p>
+        </div>
+      )}
       <form className="space-y-4" onSubmit={submit} noValidate>
         <FormError>{formError}</FormError>
         <TextField label="Full name" autoComplete="name" placeholder="Your full name" value={form.name} onChange={set("name")} error={errors.name} />

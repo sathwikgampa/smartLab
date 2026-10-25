@@ -135,7 +135,7 @@ def _heuristic_description(features: dict[str, Any], note: str) -> dict[str, Any
 
 
 def analyze_image(conn: sqlite3.Connection, rag_engine, llm: ClaudeClient, image: ValidatedFile,
-                  note: str = "") -> dict[str, Any]:
+                  note: str = "", *, team_id: int | None = None) -> dict[str, Any]:
     note = (note or "").strip()[:500]
     report = GuardrailReport()
     query_guard = screen_query(note)
@@ -171,14 +171,14 @@ def analyze_image(conn: sqlite3.Connection, rag_engine, llm: ClaudeClient, image
     sop_matches = []
     fixes = []
     if query:
-        for e in rag_engine.retrieve(conn, query, k=5):
+        for e in rag_engine.retrieve(conn, query, k=5, team_id=team_id):
             if e.score >= rag_engine.min_score:
                 sop_matches.append({"chunk_id": e.chunk_id, "document_id": e.document_id,
                                     "document_title": e.document_title, "page": e.page,
                                     "snippet": _snippet(e.text, query), "score": round(e.score, 4),
                                     "doc_type": e.doc_type, "category": e.category, "doc_code": e.doc_code,
                                     "version": e.version, "approval_status": e.approval_status})
-        fixes = troubleshooting.match(conn, query, limit=3)
+        fixes = troubleshooting.match(conn, query, limit=3, team_id=team_id)
 
     if not sop_matches and not fixes:
         report.warnings.append("No matching SOP or verified fix was found for this image. "

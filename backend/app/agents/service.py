@@ -20,18 +20,26 @@ EVIDENCE_STATUS = {"supported": "grounded", "caution": "partial", "refused": "in
 
 
 def current_organization_id() -> int:
-    """The organisation every query is scoped to.
+    """The organisation every query is scoped to."""
+    from ..tenancy import organization_id
+    try:
+        return organization_id()
+    except Exception:
+        return int(current_app.config["DEFAULT_ORGANIZATION_ID"])
 
-    TODO(auth): there is no authentication yet, so this is the configured default organisation.
-    Replace with the signed-in user's organisation once auth exists.
-    """
-    return int(current_app.config["DEFAULT_ORGANIZATION_ID"])
+
+def current_team_id() -> int:
+    from ..tenancy import team_id
+    try:
+        return team_id()
+    except Exception:
+        return int(current_app.config["DEFAULT_TEAM_ID"])
 
 
 def make_orchestrator(*, on_event: Callable[[str, dict[str, Any]], None] | None = None,
                       document_ids: list[int] | None = None) -> Orchestrator:
     app = current_app._get_current_object()
-    return Orchestrator(ToolEnv.from_app(app, current_organization_id()), app.extensions["smartlab"]["llm"],
+    return Orchestrator(ToolEnv.from_app(app, current_organization_id(), current_team_id()), app.extensions["smartlab"]["llm"],
                         AgentLimits.from_config(app.config), on_event=on_event, document_ids=document_ids)
 
 
@@ -52,9 +60,20 @@ def legacy_fields(result: dict[str, Any], question: str) -> dict[str, Any]:
 
 
 def persist_run(db, *, question: str, session_id: str, result: dict[str, Any],
-                user_id: int | None = None) -> int:
+                user_id: int | None = None, team_id: int | None = None,
+                organization_id: int | None = None) -> int:
     """Store the exchange in chat history and an audit record in ``agent_runs``. Returns the message id."""
-    db.execute("INSERT INTO chat_messages (session_id, role, content) VALUES (?, 'user', ?)", (session_id, question))
+    if team_id is None:
+        from ..tenancy import team_id as get_team_id
+        try:
+            team_id = get_team_id()
+        except Exception:
+            team_id = int(current_app.config.get("DEFAULT_TEAM_ID", 1))
+    if organization_id is None:
+        organization_id = current_organization_id()
+
+    db.execute("INSERT INTO chat_messages (team_id, session_id, role, content) VALUES (?, ?, 'user', ?)",
+               (team_id, session_id, question))
     meta = {k: result[k] for k in (
         "request_id", "intent", "status", "status_label", "confidence", "uncertainty_flag", "uncertainty_message",
         "blockers", "cautions", "checklist", "checklist_label", "inventory_status", "compatibility",
@@ -63,16 +82,16 @@ def persist_run(db, *, question: str, session_id: str, result: dict[str, Any],
     meta |= {k: v for k, v in legacy_fields(result, question).items() if k in (
         "evidence_status", "warnings", "mode", "requires_verification", "service_notice", "missing_terms")}
     cur = db.execute(
-        "INSERT INTO chat_messages (session_id, role, content, citations_json, meta_json) VALUES (?, 'assistant', ?, ?, ?)",
-        (session_id, result["response"], dumps(result["citations"]), dumps(meta)))
+        "INSERT INTO chat_messages (team_id, session_id, role, content, citations_json, meta_json) VALUES (?, ?, 'assistant', ?, ?, ?)",
+        (team_id, session_id, result["response"], dumps(result["citations"]), dumps(meta)))
     message_id = cur.lastrowid
     tools = [{k: t[k] for k in ("step", "tool", "ok", "duration_ms", "output_summary")} for t in result["agent_trace"]]
     citations = [{k: c[k] for k in ("chunk_id", "document", "page")} for c in result["citations"]]
     db.execute(
-        "INSERT INTO agent_runs (request_id, organization_id, user_id, session_id, question, intent, status, "
+        "INSERT INTO agent_runs (team_id, request_id, organization_id, user_id, session_id, question, intent, status, "
         "confidence, uncertainty_flag, blockers_json, tools_json, citations_json, llm_calls, duration_ms, started_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (result["request_id"], current_organization_id(), None if user_id is None else str(user_id), session_id, question[:2000], result["intent"],
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (team_id, result["request_id"], organization_id, None if user_id is None else str(user_id), session_id, question[:2000], result["intent"],
          result["status"], result["confidence"], bool(result["uncertainty_flag"]), dumps(result["blockers"]),
          dumps(tools), dumps(citations), result["llm_calls"], result["duration_ms"], result["started_at"]))
     db.commit()
@@ -80,14 +99,28 @@ def persist_run(db, *, question: str, session_id: str, result: dict[str, Any],
 
 
 def list_runs(db, limit: int = 50) -> list[dict[str, Any]]:
-    rows = db.execute("SELECT * FROM agent_runs WHERE organization_id = ? ORDER BY id DESC LIMIT ?",
-                      (current_organization_id(), limit)).fetchall()
+    from ..tenancy import team_id as get_team_id
+    org_id = current_organization_id()
+    try:
+        t_id = get_team_id()
+        rows = db.execute("SELECT * FROM agent_runs WHERE organization_id = ? AND team_id = ? ORDER BY id DESC LIMIT ?",
+                          (org_id, t_id, limit)).fetchall()
+    except Exception:
+        rows = db.execute("SELECT * FROM agent_runs WHERE organization_id = ? ORDER BY id DESC LIMIT ?",
+                          (org_id, limit)).fetchall()
     return [_run_row(r) for r in rows]
 
 
 def get_run(db, request_id: str) -> dict[str, Any] | None:
-    row = db.execute("SELECT * FROM agent_runs WHERE request_id = ? AND organization_id = ?",
-                     (request_id, current_organization_id())).fetchone()
+    from ..tenancy import team_id as get_team_id
+    org_id = current_organization_id()
+    try:
+        t_id = get_team_id()
+        row = db.execute("SELECT * FROM agent_runs WHERE request_id = ? AND organization_id = ? AND team_id = ?",
+                         (request_id, org_id, t_id)).fetchone()
+    except Exception:
+        row = db.execute("SELECT * FROM agent_runs WHERE request_id = ? AND organization_id = ?",
+                         (request_id, org_id)).fetchone()
     return _run_row(row) if row else None
 
 
@@ -145,8 +178,9 @@ def store_upload(db, image: ValidatedFile, upload_dir, reading: dict[str, Any]) 
     target_dir.mkdir(parents=True, exist_ok=True)
     (target_dir / image.stored_name).write_bytes(image.data)
     db.execute("INSERT INTO agent_uploads (upload_id, organization_id, stored_name, mime_type, size_bytes, "
-               "equipment_type, observed_text_json, extracted_codes_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+               "equipment_type, observed_text_json, extracted_codes_json, team_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                (upload_id, current_organization_id(), image.stored_name, image.mime_type, image.size,
-                reading["equipment_type"], dumps(reading["observed_text"]), dumps(reading["extracted_codes"])))
+                reading["equipment_type"], dumps(reading["observed_text"]), dumps(reading["extracted_codes"]),
+                current_team_id()))
     db.commit()
     return upload_id

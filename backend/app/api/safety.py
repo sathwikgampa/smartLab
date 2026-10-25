@@ -12,6 +12,7 @@ from flask import Blueprint, jsonify, request
 from ..auth import actor_name
 from ..db import audit, get_db, get_setting, query_all, set_setting
 from ..rag.engine import _snippet
+from ..tenancy import require_team_access, team_id
 from .common import ApiError, json_body, llm, rag
 
 bp = Blueprint("safety", __name__, url_prefix="/api")
@@ -23,13 +24,14 @@ EDITABLE_SETTINGS = {"institution_name": 120, "emergency_contacts": 2000, "safet
 @bp.get("/safety")
 def overview():
     db = get_db()
+    t_id = team_id()
     return jsonify({
         "documents": query_all(
             "SELECT id, title, doc_code, version, approval_status, reviewed_at, updated_at, page_count FROM documents "
-            "WHERE category = ? ORDER BY approval_status = 'approved' DESC, title", (SAFETY_CATEGORY,)),
+            "WHERE category = ? AND team_id = ? ORDER BY approval_status = 'approved' DESC, title", (SAFETY_CATEGORY, t_id)),
         "hazardous_reagents": query_all(
             "SELECT id, name, cas_number, hazard_class, location, storage_condition FROM reagents "
-            "WHERE hazard_class IS NOT NULL AND hazard_class != '' ORDER BY name"),
+            "WHERE hazard_class IS NOT NULL AND hazard_class != '' AND team_id = ? ORDER BY name", (t_id,)),
         "emergency_contacts": get_setting(db, "emergency_contacts", ""),
         "safety_office": get_setting(db, "safety_office", ""),
         "disclaimer": "SmartLab AI supplements, and does not replace, your institution's official emergency procedures, "
@@ -44,9 +46,10 @@ def search():
     if len(q) < 2:
         raise ApiError("Query parameter 'q' must be at least 2 characters.")
     db = get_db()
-    ids = [r["id"] for r in query_all("SELECT id FROM documents WHERE category = ?", (SAFETY_CATEGORY,))]
+    t_id = team_id()
+    ids = [r["id"] for r in query_all("SELECT id FROM documents WHERE category = ? AND team_id = ?", (SAFETY_CATEGORY, t_id))]
     engine = rag()
-    hits = engine.retrieve(db, q[:500], k=6, document_ids=ids) if ids else []
+    hits = engine.retrieve(db, q[:500], k=6, document_ids=ids, team_id=t_id) if ids else []
     return jsonify({
         "query": q,
         "searched_documents": len(ids),
@@ -87,6 +90,7 @@ def get_settings():
 
 
 @bp.put("/settings")
+@require_team_access("admin")
 def update_settings():
     data = json_body()
     unknown = set(data) - set(EDITABLE_SETTINGS) - {"actor"}

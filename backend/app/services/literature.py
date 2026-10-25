@@ -128,7 +128,7 @@ def extractive_summary(abstract: str, query: str, n: int = 2) -> str:
 
 def search(conn: sqlite3.Connection, rag_engine, llm: ClaudeClient, query: str, *, limit: int = 5,
            online: bool = True, timeout: float = 8.0, from_year: int | None = None, to_year: int | None = None,
-           sort: str = "relevance") -> dict[str, Any]:
+           sort: str = "relevance", team_id: int | None = None) -> dict[str, Any]:
     query = (query or "").strip()
     if len(query) < 3:
         raise ValueError("Query must be at least 3 characters.")
@@ -168,7 +168,7 @@ def search(conn: sqlite3.Connection, rag_engine, llm: ClaudeClient, query: str, 
                 pass
         paper["summary"] = summary
         paper["summary_mode"] = mode
-        related = rag_engine.retrieve(conn, paper["title"] + ". " + abstract[:600], k=3) if abstract else []
+        related = rag_engine.retrieve(conn, paper["title"] + ". " + abstract[:600], k=3, team_id=team_id) if abstract else []
         paper["related_documents"] = [
             {"document_id": e.document_id, "document_title": e.document_title, "page": e.page,
              "score": round(e.score, 3)}

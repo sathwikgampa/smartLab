@@ -13,7 +13,7 @@ import pytest
 
 from app import create_app
 from app.config import Config, TestConfig, normalize_postgres_url, redact_url, resolve_database
-from app.db import (PG_SCHEMA, SCHEMA, TABLES, TABLES_WITH_ID, PgConnection, PgPool, PgRow, connect,
+from app.db import (PG_SCHEMA, SCHEMA, TABLES, TABLES_WITH_ID, TABLES_WITHOUT_ID, PgConnection, PgPool, PgRow, connect,
                     database_target, describe_database, execute, get_db, init_schema, is_postgres, query_all,
                     query_one, translate_sql)
 
@@ -126,8 +126,9 @@ def test_tables_are_in_foreign_key_order():
 
 
 def test_tables_with_generated_ids():
-    assert "settings" not in TABLES_WITH_ID and {"documents", "chunks", "audit_log"} <= TABLES_WITH_ID
-    assert set(TABLES_WITH_ID) | {"settings"} == set(TABLES)
+    assert "settings" not in TABLES_WITH_ID and "team_memberships" not in TABLES_WITH_ID and {"documents", "chunks", "audit_log"} <= TABLES_WITH_ID
+    assert TABLES_WITHOUT_ID == {"settings", "team_memberships"}
+    assert set(TABLES_WITH_ID) | TABLES_WITHOUT_ID == set(TABLES)
 
 
 # ---------------------------------------------------------- fake psycopg2

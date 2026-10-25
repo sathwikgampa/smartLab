@@ -5,6 +5,10 @@
 const BASE = import.meta.env.VITE_API_BASE ?? "";
 export const UNREACHABLE = "Couldn't reach the server. Please try again.";
 
+let activeTeamId = null;
+export const setActiveTeamId = (id) => { activeTeamId = id ? Number(id) : null; };
+export const getActiveTeamId = () => activeTeamId;
+
 // Network-level failures are broadcast so the shell can update its connection indicator.
 const broadcast = (reachable) => window.dispatchEvent(new CustomEvent("smartlab:connection", { detail: { reachable } }));
 // A 401 from a protected endpoint means the session ended; the app sends the user to log in.
@@ -19,6 +23,9 @@ function apiError(message, status, data) {
 
 async function request(path, { method = "GET", body, signal, quiet = false } = {}) {
   const init = { method, signal, headers: {}, credentials: "include" };
+  if (activeTeamId) {
+    init.headers["X-Team-ID"] = String(activeTeamId);
+  }
   if (body !== undefined) {
     init.headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(body);
@@ -37,6 +44,9 @@ async function request(path, { method = "GET", body, signal, quiet = false } = {
   // A gateway/proxy error without the API's JSON body means the backend itself is down.
   if (!res.ok && !isJson && res.status >= 500) { if (!quiet) broadcast(false); throw apiError(UNREACHABLE, 0); }
   if (res.status === 401) signedOut(path);
+  if (res.status === 403 && data?.code === "team_forbidden") {
+    window.dispatchEvent(new CustomEvent("smartlab:team-invalid", { detail: { teamId: activeTeamId } }));
+  }
   if (!res.ok) throw apiError((isJson && data?.error) || `Request failed (${res.status})`, res.status, data);
   return data;
 }
@@ -52,11 +62,15 @@ function upload(path, fields, { onProgress, signal } = {}) {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", `${BASE}${path}`);
     xhr.withCredentials = true;
+    if (activeTeamId) xhr.setRequestHeader("X-Team-ID", String(activeTeamId));
     xhr.upload.onprogress = (e) => e.lengthComputable && onProgress?.(e.loaded / e.total);
     xhr.onload = () => {
       let data = null;
       try { data = JSON.parse(xhr.responseText); } catch { /* non-JSON body */ }
       if (xhr.status === 401) signedOut(path);
+      if (xhr.status === 403 && data?.code === "team_forbidden") {
+        window.dispatchEvent(new CustomEvent("smartlab:team-invalid", { detail: { teamId: activeTeamId } }));
+      }
       if (xhr.status >= 200 && xhr.status < 300) resolve(data);
       else if (xhr.status >= 500 && data === null) { broadcast(false); reject(apiError(UNREACHABLE, 0)); }
       else reject(apiError(data?.error || `Upload failed (${xhr.status})`, xhr.status, data));
@@ -76,9 +90,11 @@ function upload(path, fields, { onProgress, signal } = {}) {
 async function stream(path, body, { onEvent, signal } = {}) {
   let res;
   try {
+    const headers = { "Content-Type": "application/json", Accept: "text/event-stream" };
+    if (activeTeamId) headers["X-Team-ID"] = String(activeTeamId);
     res = await fetch(`${BASE}${path}`, {
       method: "POST", signal, body: JSON.stringify(body),
-      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      headers,
     });
   } catch (err) {
     if (err.name === "AbortError") throw err;
@@ -223,12 +239,29 @@ export const api = {
 
   // Collaboration
   projects: () => request("/api/projects"),
+  project: (id) => request(`/api/projects/${id}`),
   createProject: (payload) => request("/api/projects", { method: "POST", body: payload }),
+  deleteProject: (id) => request(`/api/projects/${id}`, { method: "DELETE" }),
   comments: (type, id) => request(`/api/comments/${type}/${id}`),
   addComment: (type, id, payload) => request(`/api/comments/${type}/${id}`, { method: "POST", body: payload }),
   projectFiles: (id) => request(`/api/projects/${id}/files`),
   uploadProjectFile: (id, file, uploadedBy) => upload(`/api/projects/${id}/files`, { file, uploaded_by: uploadedBy }),
-  fileUrl: (id) => `${BASE}/api/files/${id}`,
+  fileUrl: (id) => `${BASE}/api/files/${id}${activeTeamId ? `?team_id=${activeTeamId}` : ""}`,
+
+  // Teams & Invitations
+  teams: () => request("/api/teams").then((r) => (Array.isArray(r) ? r : r?.teams || [])),
+  team: (id) => request(`/api/teams/${id}`),
+  createTeam: (payload) => request("/api/teams", { method: "POST", body: payload }),
+  updateTeam: (id, payload) => request(`/api/teams/${id}`, { method: "PATCH", body: payload }),
+  archiveTeam: (id) => request(`/api/teams/${id}`, { method: "DELETE" }),
+  teamMembers: (id) => request(`/api/teams/${id}/members`),
+  addTeamMember: (id, payload) => request(`/api/teams/${id}/members`, { method: "POST", body: payload }),
+  removeTeamMember: (id, userId) => request(`/api/teams/${id}/members/${userId}`, { method: "DELETE" }),
+  teamInvitations: (id) => request(`/api/teams/${id}/invitations`),
+  createInvitation: (id, payload) => request(`/api/teams/${id}/invitations`, { method: "POST", body: payload }),
+  cancelInvitation: (id, inviteId) => request(`/api/teams/${id}/invitations/${inviteId}`, { method: "DELETE" }),
+  invitationDetails: (token) => request(`/api/invitations/${token}`),
+  acceptInvitation: (token) => request(`/api/invitations/${token}/accept`, { method: "POST" }),
 
   // Simulation, profiles, training
   simulations: () => request("/api/simulations"),

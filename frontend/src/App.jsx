@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { AppProvider, useApp } from "./context/AppContext";
+import { TeamProvider } from "./context/TeamContext";
 import AppShell, { ALL_NAV } from "./components/AppShell";
 import EvidencePanel from "./components/EvidencePanel";
 import { Drawer, Page, SkeletonRows, Spinner } from "./components/ui";
@@ -92,7 +93,7 @@ const PUBLIC = {
   terms: (route, account) => <StaticPage page="terms" account={account} />,
   contact: (route, account) => <StaticPage page="contact" account={account} />,
   login: (route) => <AuthPages.login route={route} />,
-  signup: () => <AuthPages.signup />,
+  signup: (route) => <AuthPages.signup route={route} />,
   "forgot-password": () => <AuthPages.forgot />,
   "reset-password": (route) => <AuthPages.reset route={route} />,
 };
@@ -128,7 +129,9 @@ function Root() {
 export default function App() {
   return (
     <AppProvider>
-      <Root />
+      <TeamProvider>
+        <Root />
+      </TeamProvider>
     </AppProvider>
   );
 }

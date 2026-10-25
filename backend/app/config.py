@@ -178,6 +178,10 @@ class Config:
     SMTP_STARTTLS = _env_bool("SMARTLAB_SMTP_STARTTLS", True)
     # Attempts allowed per 15 minutes, per client address and per email address.
     LOGIN_ATTEMPT_LIMIT = int(os.getenv("SMARTLAB_LOGIN_ATTEMPT_LIMIT", "10"))
+    DEFAULT_ORGANIZATION_ID = int(os.getenv("SMARTLAB_DEFAULT_ORG_ID", "1"))
+    DEFAULT_TEAM_ID = int(os.getenv("SMARTLAB_DEFAULT_TEAM_ID", "1"))
+    MULTI_TEAM = _env_bool("SMARTLAB_MULTI_TEAM", True)
+    INVITATION_EXPIRES_DAYS = int(os.getenv("SMARTLAB_INVITATION_EXPIRES_DAYS", "7"))
 
 
 class TestConfig(Config):
@@ -189,6 +193,8 @@ class TestConfig(Config):
     # Never inherit a cloud database from the environment or .env; PostgreSQL tests opt in explicitly.
     DATABASE_ENGINE = "sqlite"
     DATABASE_URL = None
+    PUBLIC_URL = "http://localhost:5173"
+    MULTI_TEAM = True
     LLM_ENABLED = False
     LITERATURE_ONLINE = False
     EMBEDDING_BACKEND = "hashing"

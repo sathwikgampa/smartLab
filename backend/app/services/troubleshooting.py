@@ -27,12 +27,22 @@ def normalise_code(code: str | None) -> str | None:
     return f"{m.group(1)}-{m.group(2)}" if m else code.upper()
 
 
-def match(conn: sqlite3.Connection, query: str, limit: int = 5, include_unverified: bool = False) -> list[dict[str, Any]]:
+def match(conn: sqlite3.Connection, query: str, limit: int = 5, include_unverified: bool = False,
+          team_id: int | None = None) -> list[dict[str, Any]]:
     codes = set(extract_error_codes(query))
     q_terms = set(tokenize(query))
     results = []
-    sql = "SELECT * FROM troubleshooting" + ("" if include_unverified else " WHERE verified = 1")
-    for row in conn.execute(sql):
+    clauses = []
+    params: list[Any] = []
+    if not include_unverified:
+        clauses.append("verified = 1")
+    if team_id is not None:
+        clauses.append("team_id = ?")
+        params.append(team_id)
+    sql = "SELECT * FROM troubleshooting"
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    for row in conn.execute(sql, params):
         entry = dict(row)
         score = 0.0
         reasons = []
@@ -57,27 +67,33 @@ def match(conn: sqlite3.Connection, query: str, limit: int = 5, include_unverifi
     return results[:limit]
 
 
-def list_entries(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    rows = [dict(r) for r in conn.execute("SELECT * FROM troubleshooting ORDER BY equipment, error_code")]
+def list_entries(conn: sqlite3.Connection, team_id: int | None = None) -> list[dict[str, Any]]:
+    sql = "SELECT * FROM troubleshooting"
+    params: list[Any] = []
+    if team_id is not None:
+        sql += " WHERE team_id = ?"
+        params.append(team_id)
+    rows = [dict(r) for r in conn.execute(sql + " ORDER BY equipment, error_code", params)]
     for r in rows:
         r["verified"] = bool(r["verified"])
     return rows
 
 
-def create_entry(conn: sqlite3.Connection, payload: dict[str, Any]) -> dict[str, Any]:
+def create_entry(conn: sqlite3.Connection, payload: dict[str, Any], team_id: int | None = None) -> dict[str, Any]:
     required = ("equipment", "symptom", "keywords", "probable_cause", "fix")
     missing = [k for k in required if not str(payload.get(k, "")).strip()]
     if missing:
         raise ValueError(f"Missing required field(s): {', '.join(missing)}.")
     page = payload.get("source_page")
+    t_id = team_id if team_id is not None else 1
     cur = conn.execute(
         "INSERT INTO troubleshooting (error_code, equipment, symptom, keywords, probable_cause, fix, "
-        "source_document, source_page, verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "source_document, source_page, verified, team_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (payload.get("error_code"), payload["equipment"], payload["symptom"], payload["keywords"],
          payload["probable_cause"], payload["fix"], payload.get("source_document"),
          int(page) if page not in (None, "") else None,
          # New entries are unverified until an expert approves them.
-         0),
+         0, t_id),
     )
     conn.commit()
     row = dict(conn.execute("SELECT * FROM troubleshooting WHERE id = ?", (cur.lastrowid,)).fetchone())

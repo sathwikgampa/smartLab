@@ -69,6 +69,8 @@ def create_app(config_object: type[Config] | Config = Config, **overrides) -> Fl
         app.extensions["smartlab_db_pool"] = PgPool(app.config["DATABASE_URL"], app.config["DB_POOL_MAX"])
     app.teardown_appcontext(close_db)
     init_auth(app)
+    from .tenancy import init_tenancy
+    init_tenancy(app)
     _register_blueprints(app)
     _register_error_handlers(app)
 
@@ -115,11 +117,12 @@ def create_app(config_object: type[Config] | Config = Config, **overrides) -> Fl
 
 def _register_blueprints(app: Flask) -> None:
     from .api import (agent, auth, chat, collaboration, data, documents, experiments, literature, profiles, reagents,
-                      safety, search, simulation, troubleshooting, vision)
+                      safety, search, simulation, teams, troubleshooting, vision)
 
     for module in (agent, auth, chat, collaboration, data, documents, experiments, literature, profiles, reagents,
-                   safety, search, simulation, troubleshooting, vision):
+                   safety, search, simulation, teams, troubleshooting, vision):
         app.register_blueprint(module.bp)
+    app.register_blueprint(teams.invitations_bp)
 
 
 def _register_error_handlers(app: Flask) -> None:

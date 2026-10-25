@@ -1,9 +1,10 @@
 """Experiment planning: protocols, checklists, variable logs and expert review checkpoints."""
 from __future__ import annotations
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, g, jsonify, request
 
 from ..db import execute, get_db, query_all, query_one
+from ..tenancy import team_id
 from .common import ApiError, json_body, require
 
 bp = Blueprint("experiments", __name__, url_prefix="/api/experiments")
@@ -14,10 +15,12 @@ REVIEW_DECISIONS = {"approved", "rejected", "changes_requested"}
 
 
 def _experiment(exp_id: int) -> dict:
+    t_id = team_id()
     exp = query_one(
         "SELECT e.*, p.name AS project_name, pr.name AS owner_name FROM experiments e "
-        "LEFT JOIN projects p ON p.id = e.project_id LEFT JOIN profiles pr ON pr.id = e.owner_id WHERE e.id = ?",
-        (exp_id,))
+        "LEFT JOIN projects p ON p.id = e.project_id AND p.team_id = e.team_id "
+        "LEFT JOIN profiles pr ON pr.id = e.owner_id WHERE e.id = ? AND e.team_id = ?",
+        (exp_id, t_id))
     if exp is None:
         raise ApiError("Experiment not found.", 404)
     return exp
@@ -43,11 +46,13 @@ def _detail(exp_id: int) -> dict:
 
 @bp.get("")
 def list_experiments():
+    t_id = team_id()
     sql = ("SELECT e.*, p.name AS project_name, pr.name AS owner_name FROM experiments e "
-           "LEFT JOIN projects p ON p.id = e.project_id LEFT JOIN profiles pr ON pr.id = e.owner_id")
-    params = []
+           "LEFT JOIN projects p ON p.id = e.project_id AND p.team_id = e.team_id "
+           "LEFT JOIN profiles pr ON pr.id = e.owner_id WHERE e.team_id = ?")
+    params = [t_id]
     if request.args.get("project_id"):
-        sql += " WHERE e.project_id = ?"
+        sql += " AND e.project_id = ?"
         params.append(request.args["project_id"])
     return jsonify(query_all(sql + " ORDER BY e.updated_at DESC, e.id DESC", params))
 
@@ -56,10 +61,15 @@ def list_experiments():
 def create_experiment():
     data = json_body()
     require(data, "title")
+    t_id = team_id()
+    project_id = data.get("project_id")
+    if project_id:
+        if not query_one("SELECT id FROM projects WHERE id = ? AND team_id = ?", (project_id, t_id)):
+            raise ApiError("Project not found.", 404)
+    owner_id = g.user.get("profile_id") if g.get("user") else data.get("owner_id")
     exp_id = execute(
-        "INSERT INTO experiments (project_id, title, objective, protocol_markdown, owner_id) VALUES (?, ?, ?, ?, ?)",
-        (data.get("project_id"), str(data["title"])[:200], data.get("objective"), data.get("protocol_markdown", ""),
-         data.get("owner_id")),
+        "INSERT INTO experiments (team_id, project_id, title, objective, protocol_markdown, owner_id) VALUES (?, ?, ?, ?, ?, ?)",
+        (t_id, project_id, str(data["title"])[:200], data.get("objective"), data.get("protocol_markdown", ""), owner_id),
     )
     for i, text in enumerate(data.get("steps") or [], start=1):
         execute("INSERT INTO experiment_steps (experiment_id, position, text) VALUES (?, ?, ?)", (exp_id, i, str(text)))
@@ -81,6 +91,9 @@ def update_experiment(exp_id: int):
         raise ApiError(f"status must be one of: {', '.join(sorted(STATUSES))}.", 422)
     if "title" in allowed and not str(allowed["title"]).strip():
         raise ApiError("title cannot be empty.", 422)
+    if "project_id" in allowed and allowed["project_id"] is not None:
+        if not query_one("SELECT id FROM projects WHERE id = ? AND team_id = ?", (allowed["project_id"], team_id())):
+            raise ApiError("Project not found.", 404)
     if allowed:
         sets = ", ".join(f"{k} = ?" for k in allowed)
         execute(f"UPDATE experiments SET {sets}, updated_at = datetime('now') WHERE id = ?", [*allowed.values(), exp_id])
@@ -108,6 +121,7 @@ def add_step(exp_id: int):
 
 @bp.patch("/<int:exp_id>/steps/<int:step_id>")
 def update_step(exp_id: int, step_id: int):
+    _experiment(exp_id)
     if not query_one("SELECT id FROM experiment_steps WHERE id = ? AND experiment_id = ?", (step_id, exp_id)):
         raise ApiError("Step not found.", 404)
     data = json_body()
@@ -121,6 +135,7 @@ def update_step(exp_id: int, step_id: int):
 
 @bp.delete("/<int:exp_id>/steps/<int:step_id>")
 def delete_step(exp_id: int, step_id: int):
+    _experiment(exp_id)
     execute("DELETE FROM experiment_steps WHERE id = ? AND experiment_id = ?", (step_id, exp_id))
     _recompute_progress(exp_id)
     return jsonify(_detail(exp_id))
@@ -128,6 +143,7 @@ def delete_step(exp_id: int, step_id: int):
 
 @bp.put("/<int:exp_id>/steps/order")
 def reorder_steps(exp_id: int):
+    _experiment(exp_id)
     data = json_body()
     order = data.get("step_ids")
     if not isinstance(order, list):
@@ -170,6 +186,7 @@ def request_review(exp_id: int):
 
 @bp.post("/<int:exp_id>/reviews/<int:review_id>/decision")
 def decide_review(exp_id: int, review_id: int):
+    _experiment(exp_id)
     review = query_one("SELECT * FROM reviews WHERE id = ? AND experiment_id = ?", (review_id, exp_id))
     if review is None:
         raise ApiError("Review not found.", 404)
